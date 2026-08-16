@@ -231,9 +231,11 @@ pub fn save_contract(
         for f in sources {
             // Sanitize at the write boundary (defense in depth): `Path::starts_with`
             // is a lexical check that does NOT resolve `..`, so it can't be trusted
-            // alone. `sanitize_path` strips `..`/`.`/absolute/drive components, so
-            // the join can never escape `src_root`; the guard below is then a true
-            // assertion that must always hold.
+            // alone. `sanitize_path` drops `..`/`.`/empty components, so on Unix the
+            // join can never climb out of `src_root`. It deliberately does NOT strip
+            // a Windows drive prefix (`C:/…`), which `join` treats as absolute and
+            // substitutes wholesale — that is the case the guard below actually
+            // catches, and it is reachable only on Windows.
             let target = src_root.join(sanitize_path(&f.path));
             if !target.starts_with(&src_root) {
                 return Err(AppError::Io(std::io::Error::new(
@@ -566,12 +568,36 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path();
         let d = details("0xESCAPE", true);
-        // Absolute path escapes the source root (test runs on Windows).
-        let sources = vec![SourceFile {
-            path: "C:/evil.sol".into(),
-            content: "x".into(),
-        }];
-        let err = save_contract(out, &d, &sources, None).unwrap_err();
-        assert!(matches!(err, AppError::Io(_)));
+        let contract = contract_dir(out, "0xESCAPE");
+
+        // Hostile paths as they could arrive in an Etherscan source manifest.
+        // Whether a given string *is* an escape is platform-specific — `C:/x` is
+        // absolute on Windows but an ordinary directory name on Unix — so assert
+        // the invariant that holds everywhere instead of demanding a specific
+        // error: a save either refuses, or writes strictly inside `source/`.
+        for hostile in [
+            "../../evil.sol",
+            "./../evil.sol",
+            "/etc/passwd",
+            "C:/evil.sol",
+            r"..\..\evil.sol",
+        ] {
+            let sources = vec![SourceFile {
+                path: hostile.into(),
+                content: "x".into(),
+            }];
+            if let Err(e) = save_contract(out, &d, &sources, None) {
+                assert!(matches!(e, AppError::Io(_)), "{hostile}: unexpected {e:?}");
+                continue;
+            }
+            for probe in [
+                out.join("evil.sol"),
+                out.join("passwd"),
+                contract.join("evil.sol"),
+                contract.join("passwd"),
+            ] {
+                assert!(!probe.exists(), "{hostile} escaped to {}", probe.display());
+            }
+        }
     }
 }
