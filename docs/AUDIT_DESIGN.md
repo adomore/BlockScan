@@ -989,6 +989,80 @@ function mint(uint n) external {
 
 > 状态:✅ Phase 26 完成(`is_caller_expression` 同时识别 `msg.sender` 与 `_msgSender()`,供守卫识别与守卫变量收集共用)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **673 测试** = 568 单元 + 105 集成,clippy 零告警(本机实测)。语料实测 ACCESS 发现 31 → 30。后续 Phase 27+:**修饰符调用经绑定图解析到定义**(消除对 `only*` 命名约定的依赖);`hasRole` / 自定义错误守卫形态;守卫按完整访问路径记录。
 
+## Phase 27:reentrancy 的任意外部调用面 ✅
+
+### 先测,而且数据又一次否掉了归档的计划
+Phase 26 归档的 Phase 27 是「修饰符调用经绑定图解析到定义」。先在语料上量化,结论是**不该做**:
+
+| 候选 | 单元数 | 次数 |
+|---|---|---|
+| 非 `only*` 命名的守卫修饰符 | 3 / 42 | **3** |
+| 自定义错误守卫 `if..revert` | 1 / 42 | 1 |
+| `_checkOwner` / `_checkRole` 调用 | 0 / 42 | 0 |
+| **外部方法调用(`transfer`/`deposit`/…)** | **10 / 42** | **21** |
+| 低层调用 `.call` / `.send` | 33 / 42 | 76 |
+
+而且那 3 个「非 `only*` 守卫修饰符」实际是 `noSelfCall`、`noSelfCall`、`isNotLocked`——**防自调用和重入锁,根本不是访问控制守卫**。真实实例为 0。**连续第二次由数据否掉自己归档的下一期计划**,这正是「先测再定」该起的作用。
+
+### 缺陷:重入面只认低层调用
+`REENTRANCY_SINKS` 是 4 个文本后缀:`.call` / `.delegatecall` / `.transfer` / `.send`。于是 `vault.deposit(n)`、`token.safeTransfer(...)`、`pool.swap(...)` 这类**任意外部方法调用**完全不算外部调用——而它们同样能重入(恶意代币、ERC-777 钩子、任意被调合约)。
+
+### 本期检测
+`MemberAccessExpression` 的接收者经绑定图解析为 `ContractLike`(与 `detect_eth_transfer_send` 区分 `endpoint.send(payload)` 同一机制),**且**被调方法非 `view`/`pure` 时,计为外部调用。
+
+**view 过滤器不是可选项,是必需的**——原型实测:
+
+| 配置 | 语料 reentrancy 发现 |
+|---|---|
+| 基线(仅低层调用) | 2 |
+| 无 view 过滤 | 4 —— 其中 1 条纯误报(`pool.positions(key)`,Uniswap V3 的 view)、1 条锚点落在 view 的 `factory()` 上 |
+| **有 view 过滤** | **3** —— 误报消失,锚点移到真实的 `addLiquidityETH` |
+
+### 实测收益(诚实声明)
+**净增 1 条**(2 → 3):`UNIv4.sol:395`,`addLiquidityETH(...)` 后写 `tradingOpen=true`,无 `nonReentrant` 守卫——真实的 CEI 违反模式(该函数为 `onlyOwner`,实际可利用性低,但模式成立)。
+
+规模就是 1 条。**不主张更多**——Phase 25 的教训是不要把「机制正确」说成「收益已兑现」。
+
+### 净效果 / 不变量
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / 指纹**不变**。
+- **单向:只增发现**(更宽的外部调用面)。本期的 `is_caller_expression` 没有第二个反向使用点——这条不变量是**逐个使用点核对过的**,不是假设的(Phase 26 正是栽在没核对第二个使用点上)。
+- 无绑定图时 `contract_call` 恒为 false,逐行退回 Phase 16 行为。
+
+### 已知取舍(诚实声明)
+- 解析失败(未知方法、跨文件未解析、无属性)时**按「会变更」处理** → 保守地计为外部调用,可能误报。方向是刻意选的:重入漏报的代价高于多报一次。
+- 只认**接收者是标识符**的成员调用(`receiver_identifier`)。`IThing(addr).method()`、`payable(x).method()` 这类复杂接收者不认。
+- 不区分「被调合约是否可信」。`onlyOwner` 门控下调用 Uniswap 路由器仍会报——CEI 模式成立,但实际可利用性低。
+- **接收者必须是变量**:`resolve_decl_type` 现在只分类值声明,所以类型名接收者(`Lib.fn()`)一律不认——这既是修复,也意味着经类型名转发的真实外部调用不会被识别(方向:漏报)。
+
+### 对抗式审查记录(Phase 27,3-lens workflow + 双证伪 agent,13 个 agent 全部完成)
+
+**确认的 ship-blocker —— 类型名接收者被当成合约实例**
+
+`contract_call` 对**每一个** `MemberAccessExpression` 的接收者调 `resolve_decl_type`,但接收者也可能是**类型名**(`Base.fn()`、`Lib.fn()`、`IThing.fn.selector`)。此时 definiens 是合约/库/接口/错误**本身**,而 `decl_resolved_type` 会 `go_to_next_nonterminal_with_kind(TypeName)` 扫描它的整个子树——于是**这个合约被它内部第一个出现的类型名所定义**。
+
+本地实测(修复前):
+
+| 用例 | 结果 |
+|---|---|
+| `Vault._mintShares(n)`(限定的**内部**调用) | 报 |
+| 同代码,两个无关状态变量**声明顺序对调** | **不报** |
+| `IRouter.swap.selector`(**根本没有调用**) | 报 |
+| `Cfg.CAP`(库常量读取) | 报 |
+
+第二行是本质:**判定取决于无关成员的声明顺序**。第三行是最坏情形——发现被锚定在一个没有任何外部调用的行上。
+
+**这是同一缺陷类别第五次复发**,但位置更深:前四次在**使用侧**(取错 token / 错的粒度 / 漏掉第二个使用点),这次在**定义侧**——把 definiens 子树里第一个 `TypeName` 当成该定义的类型。
+
+**修复范围超出本期**:`resolve_decl_type` 有 **4 个调用点**(Phase 21 的 `transfer/send`、Phase 22 的收窄 cast、Phase 24 的 `.push/.pop`、本期的重入面)。所以这是 **Phase 22 绑定图基础设施里的潜伏缺陷,被 Phase 27 首次暴露**,修复同时校正了另外三处的潜在误判。
+
+**修复**:`resolve_decl_type` 只在 definiens 是**值声明**(`Parameter` / `StateVariableDefinition` / `VariableDeclarationStatement`)时才分类,否则返回 `None`。四种误报形态全部消失,语料 reentrancy 仍为 3、access 仍为 30——**真实发现一条未损**。
+
+**试过但放弃的第二道闸门**:审查还建议要求成员访问必须是调用的 callee。实测该闸门**不必要**(闸门 (a) 已消灭全部四种形态),且我写的导航是**错的**——slang 把操作数包在 `Expression` 节点里,父节点并非 `FunctionCallExpression`,导致合法用例 `v.deposit(n)` 也不报了。已回退,保留更窄的单一修复。
+
+**独立复核的不变量**:「只增发现」经**构造性证明**成立——`earliest_external_call` 在候选集合上取最小偏移,加宽集合只会让锚点前移或不变;而 `state_write_after` 统计 `offset > call_off` 的写入,阈值降低即为超集。两条单调性合起来:原先报的必然还报,原先无锚点的可能新增。审查独立确认了这一点,以及不变量 3(无绑定图时行为为 Phase 16)。
+
+> 状态:✅ Phase 27 完成(重入面从 4 个文本后缀扩为「合约类型接收者上的非 view 方法调用」;view 过滤器与值声明闸门均为实测所必需)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **680 测试** = 575 单元 + 105 集成,clippy 零告警(本机实测)。语料 reentrancy 2 → 3。后续 Phase 28+:`resolve_decl_type` 的其余接收者形态(`IThing(addr).m()`、`payable(x).m()`);守卫按完整访问路径;同文件三元左值的既有不精确。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。

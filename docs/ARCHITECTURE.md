@@ -207,18 +207,18 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 
 ## 代码量统计
 
-> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至 Phase 26)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
+> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至 Phase 27)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
 
 | 类别 | 行数 | 备注 |
 |---|---|---|
-| **生产代码**(33 个 src 模块) | **10106** | Top:`ast.rs` 1832 · `audit.rs` 1,360 · `lib.rs` 1,315 · `mcp.rs` 905 · `rpc.rs` 497 · `scanner.rs` 444 · `cli.rs` 399 · `enrich.rs` 271 · `storage.rs` 259 · `model.rs` 226 |
-| **单元测试**(src 内联 `mod tests`) | **6804** | 568 个用例,分布于各模块;Top:`ast.rs` 1701 · `audit.rs` 761 · `mcp.rs` 442 · `storage.rs` 344 · `lib.rs` 308 · `scanner.rs` 301 |
+| **生产代码**(33 个 src 模块) | **10,152** | Top:`ast.rs` 1,878 · `audit.rs` 1,360 · `lib.rs` 1,315 · `mcp.rs` 905 · `rpc.rs` 497 · `scanner.rs` 444 · `cli.rs` 399 · `enrich.rs` 271 · `storage.rs` 259 · `model.rs` 226 |
+| **单元测试**(src 内联 `mod tests`) | **6,880** | 575 个用例,分布于各模块;Top:`ast.rs` 1,777 · `audit.rs` 761 · `mcp.rs` 442 · `storage.rs` 344 · `lib.rs` 308 · `scanner.rs` 301 |
 | **集成测试** `tests/integration.rs` | **3,198** | 105 个用例(wiremock mock RPC/Etherscan/Blockscout/Sourcify/GitHub/Google/website/DefiLlama/TokenList/CoinGecko + 真二进制断言,含 MCP stdio + 本地 HTTP 往返) |
 | examples(链上小工具) | 96 | `analyze` 39 · `log_scan` 37 · `resolve_proxy` 20 |
 | 文档(docs/*.md + README) | **2,500+** | 9 份域设计文档 + 中/英用户手册 + 本文;见下索引 |
 
-- **生产 : 测试 ≈ 10106 : 10002**(单元 6804 + 集成 3,198)≈ **1 : 0.99**。
-- **测试 673 个**(568 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 ~97.8%**(区域 97.27%、函数 98.86%)——由 CI 的 `coverage` job **每次推送实测**、门禁设在 97%,非手工维护。此处只记百分比:精确行数每次提交都会微动,以最近一次 job 日志为准。
+- **生产 : 测试 ≈ 10,152 : 10,078**(单元 6,880 + 集成 3,198)≈ **1 : 0.99**。
+- **测试 680 个**(575 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 ~97.8%**(区域 97.27%、函数 98.86%)——由 CI 的 `coverage` job **每次推送实测**、门禁设在 97%,非手工维护。此处只记百分比:精确行数每次提交都会微动,以最近一次 job 日志为准。
   - 11 个模块 100%(`audit`/`model`/`events`/`group`/`suppress`/`baseline`/`report`/`sarif`/`config`/`chains`/`throttle`);`ast.rs` 97.00%、`mcp.rs` 97.54%。
   - 最大缺口是 **`lib.rs` 91.3%**(约占全工作区未覆盖行的四成)——watch/monitor 循环与多链 fan-out 的错误路径需真实链才能触达;其余为防御性 `?`/不可达的游标 API 守卫。
 
@@ -249,6 +249,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | 审计 绑定图 reentrancy 跨文件 | `REENTRANCY_*` 的「是否状态写入」由**当前文件名字集合**升级为**绑定图定义解析**:继承自其他文件的状态变量可见(教科书 `withdraw()` 此前完全漏报)、局部遮蔽同名状态的误报消除、有图时解除 `state.is_empty()` 提前返回;左值按**边标签**导航(`LeftOperand`/`Operand`)而非取首标识符;`.push/.pop` 的合约类型接收者不计作状态写入 | AUDIT_DESIGN Phase 24 ✅ |
 | 审计 绑定图 access-control | `ACCESS_MISSING_GUARD_PRIVILEGED_FN` 的特权判定由「26 名字精确匹配」扩为**名字 ∪ 写入守卫变量**:守卫变量 = 单元内与 `msg.sender` 比较的**裸**状态变量(跨文件收集),写它却无守卫即无鉴权改变权限,与函数名无关;结构体/映射字段守卫不入集合(否则 diamond 布局下每个 public 函数都会被报) | AUDIT_DESIGN Phase 25 ✅ |
 | 审计 调用者间接层 | `is_caller_expression` 同时识别 `msg.sender` 与 OpenZeppelin `Context._msgSender()`(ERC-2771 元交易间接层,语料 10/42 单元、97 次):守卫识别不再把 `require(_msgSender() == owner)` 判为无守卫(**对正确代码的误报**),守卫变量收集同样受益。语料 ACCESS 发现 31 → 30 | AUDIT_DESIGN Phase 26 ✅ |
+| 审计 重入的任意外部调用面 | `REENTRANCY_*` 的外部调用面从 4 个文本后缀(`.call`/`.delegatecall`/`.transfer`/`.send`)扩为**合约类型接收者上的非 view 方法调用**(`vault.deposit(n)`):两道闸门均为实测所必需——view 过滤器(否则 Uniswap V3 的 `pool.positions(key)` 被当成重入点)、`resolve_decl_type` 只分类**值声明**(否则 `Lib.fn()` / `Error.selector` 按定义体内首个类型名被误判为合约实例)。语料 reentrancy 2 → 3 | AUDIT_DESIGN Phase 27 ✅ |
 | SARIF 输出 | SARIF 2.1.0 + `partialFingerprints`(GitHub Code Scanning 基线/去重) | AUDIT_DESIGN Phase 10 ✅ |
 | 审计抑制 | `--suppress` JSON 配置(rule/contract/swc/category/fingerprint 匹配,评分前剔除,fail-safe) | AUDIT_DESIGN Phase 12 ✅ |
 | 防御监控 `monitor` | 区间 `eth_getLogs` 解码安全事件(代理升级/所有权/管理员,`--alert-topic` 扩展)→ `Alert` 落 alerts.jsonl/webhook/stdout · `--watchlist` 限定 | MONITOR_DESIGN 批量3 ✅ |
@@ -267,7 +268,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 
 | 模块 | 内容 | 依据 |
 |---|---|---|
-| **绑定图后续(Phase 27+)** | **修饰符调用经绑定图解析到定义**(消除对 `only*` 命名约定的依赖,语料实测该形态 0 次但为既有误报根因);`hasRole` / 自定义错误守卫形态;reentrancy 的任意外部方法调用面;同文件三元左值的既有不精确 | AUDIT_DESIGN Phase 26「后续」 |
+| **绑定图后续(Phase 28+)** | `resolve_decl_type` 的其余接收者形态(`IThing(addr).m()` / `payable(x).m()`);守卫按完整访问路径记录;同文件三元左值的既有不精确;修饰符调用解析(语料实测 0 次,优先级低) | AUDIT_DESIGN Phase 27「后续」 |
 | 更多发现源 | CoinGecko/CMC · ethereum-lists · Sourcify 全量 · 4byte 聚类 · 工厂展开 · Dune | 见 📋 TODO |
 | WS `subscribe` 替代轮询;watch 下载模式多链 | 监控后续 | MONITOR_DESIGN「后续」 |
 
@@ -292,7 +293,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | [ANALYSIS_DESIGN.md](ANALYSIS_DESIGN.md) | 字节码静态分析 + 克隆聚类(批量1) | ✅ |
 | [OUTPUT_DESIGN.md](OUTPUT_DESIGN.md) | `--format` 机器输出 + manifest(批量2) | ✅ |
 | [DISCOVERY_DESIGN.md](DISCOVERY_DESIGN.md) | `discover` 多源发现 + 源选型 | ✅(部分源标 📋 待办) |
-| [AUDIT_DESIGN.md](AUDIT_DESIGN.md) | 安全审计引擎 Phase 8–26 ✅(标准化/深度规则/SARIF/抑制/SCWE-EthTrust/AST 精化/数据流/reentrancy/access-control/weak-randomness/ecrecover/arbitrary-delegatecall/transfer-send/收窄-cast/**绑定图 scope-aware 类型解析**/**delegatecall alias 回溯**) | ✅ |
+| [AUDIT_DESIGN.md](AUDIT_DESIGN.md) | 安全审计引擎 Phase 8–27 ✅(标准化/深度规则/SARIF/抑制/SCWE-EthTrust/AST 精化/数据流/reentrancy/access-control/weak-randomness/ecrecover/arbitrary-delegatecall/transfer-send/收窄-cast/**绑定图 scope-aware 类型解析**/**delegatecall alias 回溯**) | ✅ |
 | [MONITOR_DESIGN.md](MONITOR_DESIGN.md) | 防御监控 批量3 + Phase 12–19(部署风险/去重/watch 实时/事件扩展+节流/分组 digest/周期 + 多链并行) | ✅ |
 | [MCP_DESIGN.md](MCP_DESIGN.md) | MCP 服务器 Phase 16/18/20(协议/工具集/resources/选型/stdio + 本地 HTTP 传输) | ✅ |
 

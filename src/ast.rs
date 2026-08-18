@@ -770,7 +770,7 @@ fn detect_reentrancy(root: &Cursor, bg: Option<&Rc<BindingGraph>>, hits: &mut Ve
         if has_reentrancy_guard(&func) {
             continue;
         }
-        let Some((call_off, call_line)) = earliest_external_call(&func) else {
+        let Some((call_off, call_line)) = earliest_external_call(&func, bg) else {
             continue;
         };
         if state_write_after(&func, &state, call_off, bg) {
@@ -783,13 +783,42 @@ fn detect_reentrancy(root: &Cursor, bg: Option<&Rc<BindingGraph>>, hits: &mut Ve
     }
 }
 
-/// Offset + 1-based line of the earliest low-level external call in `func`.
-fn earliest_external_call(func: &Cursor) -> Option<(usize, usize)> {
+/// Whether the method named by a `MemberAccessExpression` is *not* view/pure, i.e.
+/// the call can actually re-enter. `pool.positions(k)` is a view read and cannot;
+/// treating it as a reentrancy sink anchors the finding on the wrong statement.
+/// `None`-ish outcomes (unresolvable member, no attributes) are treated as
+/// mutating, since an unknown method is the conservative direction here.
+fn callee_mutates(member: &Cursor, bg: &Rc<BindingGraph>) -> bool {
+    let mut m = member.spawn();
+    if !to_child(&mut m, EdgeLabel::Member) {
+        return true;
+    }
+    let Some(reference) = bg.reference_at(&m) else { return true };
+    let Some(def) = reference.definitions().into_iter().next() else { return true };
+    let BindingLocation::UserFile(loc) = def.definiens_location() else { return true };
+    let decl = loc.cursor();
+    if !matches!(decl.node().kind(), NodeKind::Nonterminal(NonterminalKind::FunctionDefinition)) {
+        return true;
+    }
+    match own_function_attributes(&decl.spawn()) {
+        Some(attrs) => !is_view_or_pure(&attrs),
+        None => true,
+    }
+}
+
+/// Offset + 1-based line of the earliest external call in `func` — a low-level
+/// call by name, or a mutating method on a contract-typed receiver.
+fn earliest_external_call(func: &Cursor, bg: Option<&Rc<BindingGraph>>) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize)> = None;
     let mut c = func.clone();
     while c.go_to_next_nonterminal_with_kind(NonterminalKind::MemberAccessExpression) {
         let text = squeeze(&c.node().unparse());
-        if REENTRANCY_SINKS.iter().any(|s| text.ends_with(s)) {
+        let contract_call = bg.is_some_and(|g| {
+            receiver_identifier(&c)
+                .is_some_and(|r| matches!(resolve_decl_type(&r, g), Some(ResolvedType::ContractLike)))
+                && callee_mutates(&c, g)
+        });
+        if REENTRANCY_SINKS.iter().any(|s| text.ends_with(s)) || contract_call {
             let off = c.text_offset().utf8;
             if best.is_none_or(|(b, _)| off < b) {
                 best = Some((off, c.text_range().start.line + 1));
@@ -1738,7 +1767,24 @@ fn resolve_decl_type(use_ident: &Cursor, bg: &Rc<BindingGraph>) -> Option<Resolv
     let BindingLocation::UserFile(loc) = def.definiens_location() else {
         return None;
     };
-    decl_resolved_type(loc.cursor(), bg)
+    let decl = loc.cursor();
+    // Only a *value* declaration has a declared type to read. When the identifier
+    // is a type name — `Lib.fn()`, `Base.fn()`, `IThing.fn.selector` — the
+    // definiens is the library/contract/interface itself, and `decl_resolved_type`
+    // would then classify it by the first `TypeName` anywhere inside its body. The
+    // answer would depend on the declaration order of unrelated members: swapping
+    // two state variables in a base contract flipped a reentrancy verdict.
+    if !matches!(
+        decl.node().kind(),
+        NodeKind::Nonterminal(
+            NonterminalKind::Parameter
+                | NonterminalKind::StateVariableDefinition
+                | NonterminalKind::VariableDeclarationStatement
+        )
+    ) {
+        return None;
+    }
+    decl_resolved_type(decl, bg)
 }
 
 /// Classify the declared type of a declaration node (the `definiens`: a
@@ -3500,6 +3546,83 @@ mod tests {
         assert!(unit_has(src, ACCESS));
     }
 
+    // ---- Phase 27: reentrancy through arbitrary external calls ----
+
+    #[test]
+    fn a_mutating_call_on_a_contract_typed_var_is_an_external_call() {
+        // `vault.deposit(...)` is not a low-level call, so REENTRANCY_SINKS never
+        // saw it; the callee can re-enter and the state write follows it.
+        let src = "pragma solidity ^0.8.0;\ninterface IVault { function deposit(uint) external; }\ncontract C {\n  IVault v;\n  uint total;\n  function f(uint n) external { v.deposit(n); total += n; }\n}\n";
+        assert!(unit_has(src, REENT));
+        assert!(!has(src, REENT)); // needs the graph to know `v` is a contract
+    }
+
+    #[test]
+    fn a_view_call_is_not_an_external_call_for_reentrancy() {
+        // `v.peek()` is a view read: it cannot re-enter and mutate, so it must not
+        // anchor a finding. Measured on the corpus, dropping this filter reported
+        // `pool.positions(key)` — a Uniswap V3 view — as a reentrancy sink.
+        let src = "pragma solidity ^0.8.0;\ninterface IVault { function peek() external view returns (uint); }\ncontract C {\n  IVault v;\n  uint total;\n  function f() external { total = v.peek(); }\n}\n";
+        assert!(!unit_has(src, REENT));
+    }
+
+    #[test]
+    fn the_earliest_mutating_call_anchors_the_finding() {
+        // A view call before a mutating one must not become the anchor: the report
+        // should point at `move`, not `peek`.
+        let src = "pragma solidity ^0.8.0;\ninterface IVault { function peek() external view returns (uint); function move(uint) external; }\ncontract C {\n  IVault v;\n  uint total;\n  function f() external { uint p = v.peek(); v.move(p); total = p; }\n}\n";
+        let hits: Vec<usize> = detect_unit(&[("m.sol", src)])
+            .expect("unit")
+            .into_values()
+            .flatten()
+            .filter(|h| h.rule_id == REENT)
+            .map(|h| h.line)
+            .collect();
+        assert_eq!(hits, vec![6], "expected the anchor on the v.move line");
+    }
+
+    #[test]
+    fn a_plain_local_receiver_is_not_an_external_call() {
+        // `s.push(x)` on a storage array resolves to a non-contract type and must
+        // not be read as an external call.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint[] s;\n  uint total;\n  function f(uint n) external { s.push(n); total += n; }\n}\n";
+        assert!(!unit_has(src, REENT));
+    }
+
+    #[test]
+    fn a_type_name_receiver_is_not_a_contract_instance() {
+        // `Vault._mintShares(n)` is a qualified INTERNAL call — a jump, not an
+        // external call. The receiver is a type name, so its definiens is the
+        // contract itself; classifying that by "the first TypeName in its subtree"
+        // made the verdict depend on the declaration order of unrelated members.
+        let base = "interface IERC20 { function transfer(address, uint) external returns (bool); }\ncontract Vault { IERC20 public asset; uint internal shares;\n  function _mintShares(uint n) internal virtual { shares += n; }\n}\n";
+        let src = format!("pragma solidity ^0.8.0;\n{base}contract Pool is Vault {{ uint public total;\n  function deposit(uint n) external {{ Vault._mintShares(n); total += n; }}\n}}\n");
+        assert!(!unit_has(&src, REENT));
+        // The same file with the two state variables swapped must agree — before
+        // the fix, one order reported and the other did not.
+        let swapped = src.replace(
+            "IERC20 public asset; uint internal shares;",
+            "uint internal shares; IERC20 public asset;",
+        );
+        assert!(!unit_has(&swapped, REENT));
+    }
+
+    #[test]
+    fn a_library_qualified_call_is_not_an_external_call() {
+        let src = "pragma solidity ^0.8.0;\ninterface IERC20 { function transfer(address, uint) external returns (bool); }\nlibrary Acct {\n  function scale(IERC20 t, uint a) internal pure returns (uint) { return a; }\n  function bump(uint[] storage s, uint a) internal returns (uint) { s.push(a); return a; }\n}\ncontract C { uint[] hist; uint public total;\n  function f(uint n) external { uint x = Acct.bump(hist, n); total += x; }\n}\n";
+        assert!(!unit_has(src, REENT));
+    }
+
+    #[test]
+    fn member_reads_that_invoke_nothing_are_not_calls() {
+        // `.selector` and a library constant perform no call at all; anchoring a
+        // finding on them points at a line where nothing external happens.
+        let sel = "pragma solidity ^0.8.0;\ninterface IERC20 { function transfer(address, uint) external returns (bool); }\ninterface IRouter { function swap(IERC20 t, uint n) external; }\ncontract C { uint public total; bytes public payload;\n  function build(address t, uint n) external { payload = abi.encodeWithSelector(IRouter.swap.selector, t, n); total += n; }\n}\n";
+        assert!(!unit_has(sel, REENT));
+        let konst = "pragma solidity ^0.8.0;\ninterface IERC20 { function transfer(address, uint) external returns (bool); }\nlibrary Cfg { IERC20 internal constant TOKEN = IERC20(address(0)); uint internal constant CAP = 7; }\ncontract C { uint public total;\n  function f(uint n) external { uint x = Cfg.CAP; total += n + x; }\n}\n";
+        assert!(!unit_has(konst, REENT));
+    }
+
     // ---- Phase 26: the _msgSender() caller indirection ----
 
     #[test]
@@ -3529,5 +3652,4 @@ mod tests {
         assert!(unit_has(src, ACCESS));
     }
 }
-
 
