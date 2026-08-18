@@ -719,6 +719,113 @@ contract P { address v1; address v2;
 
 > 状态:✅ Phase 23 完成(delegatecall 接收者经绑定图回溯到定义,补上「一次局部赋值即漏报」的 Parity 级接管;顺带消除 `function_param_names` 过度收集导致的误报)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / SARIF 指纹不变。全量 **655 测试** = 550 单元 + 105 集成,clippy 零告警(**本机实测**,非仅 CI)。对抗式审查确认并修复 1 个 ship-blocker。后续 Phase 24+:reentrancy 跨文件继承状态、access-control 消除名字启发式。
 
+## Phase 24:绑定图扩面(二)——reentrancy 跨文件继承状态 ✅
+
+**目标**:`REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE` 判断「写的是不是状态变量」目前靠**当前文件的名字集合**(`state_variable_names(root)`)。这在两个方向都不准。
+
+**漏报(主要,也是本期动机)**——状态变量继承自另一个文件时,当前文件的名字集合里根本没有它:
+
+```solidity
+// Base.sol
+contract Base { mapping(address => uint) internal balances; }
+
+// Vault.sol
+import "./Base.sol";
+contract Vault is Base {
+    function withdraw() external {
+        (bool ok, ) = msg.sender.call{value: balances[msg.sender]}("");
+        balances[msg.sender] = 0;   // 教科书级 CEI 违反 —— 却不报
+    }
+}
+```
+
+**误报**——局部变量遮蔽同名状态变量时,写局部被当成写状态:
+
+```solidity
+contract C {
+    uint total;
+    function f() external {
+        uint total = 1;                    // 局部,遮蔽
+        (bool ok, ) = msg.sender.call("");
+        total = 2;                         // 写的是局部,不是 CEI 违反
+    }
+}
+```
+
+**还有一处结构性漏报**:`detect_reentrancy` 开头有 `if state.is_empty() { return; }` 的提前返回。子合约若**自身不声明任何状态变量、全部继承**,当前文件名字集合为空 → 整个函数体不再检查。这恰好是本期要覆盖的场景,必须一并解除。
+
+### 本期检测(精确)
+写入目标的**基标识符**经绑定图解析到定义:
+
+| 定义节点 | 判定 |
+|---|---|
+| `StateVariableDefinition` | 是状态写入(**跨文件、含继承**) |
+| `VariableDeclarationStatement` / `Parameter` | 不是(局部/形参,消除遮蔽误报) |
+| 解析失败 | **退回当前文件名字集合**——既有行为,不产生任何方向的回归 |
+
+有绑定图时,`state.is_empty()` 提前返回同步解除(名字集合仅作兜底,不再是「有没有状态变量」的判据)。
+
+### 把 Phase 23 的教训带进来(初版没带够,已修正)
+本节初稿写的是:四种写入形态都是「操作数在前」,所以复用既有的「取子树第一个标识符」是安全的。**这个论证是错的**,并被本期对抗式审查当场证伪。
+
+「操作数在前」成立,但**不蕴含「子树里第一个 `Identifier` 终结符就是左值基」**——操作数本身可以是带括号的三元:
+
+```solidity
+(useFirst ? a : b)[0] = 1;   // 首标识符 = useFirst(条件),而非 a/b
+this.x = 1;                  // 首标识符 = x(成员名),base 是关键字
+```
+
+于是 Phase 23 的缺陷类别**原样复发**。修正后改为**按边标签导航**:`AssignmentExpression` 走 `LeftOperand`,前缀/后缀/成员访问走 `Operand`;随后要求该标识符**位于操作数文本开头**。不满足则返回 `None`,调用方保留旧答案,而不是把错误的 token 喂给绑定图。
+
+### 净效果 / 不变量
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / SARIF 指纹**不变**——只增精度。
+- 无绑定图(单文件 `detect` 路径、建图失败)时**逐行退回 Phase 16 行为**,含 `state.is_empty()` 提前返回。
+- 解析失败时退回名字集合,而非武断判定——不确定不改变既有结论。
+
+### 已知取舍(诚实声明)
+- **元组解构** `(a, stateVar) = f()` 仍走字符串解析 + 名字集合,本期不改:它需要逐个左值目标的结构化定位,风险与收益不匹配。故继承来的状态变量若只在元组左值里被写,仍漏报。
+- 仍不区分「写的是同一个存储槽」——`balances[k]` 与 `balances` 视作同一变量。
+- **同文件**的三元左值(`(cond ? a : b)[0] = 1`,`cond` 为本文件状态变量)仍会误报:那是 Phase 16 起的既有不精确,走的是名字集合兜底路径。本期只修了绑定图路径扩大出来的跨文件部分——修兜底路径会改变无图时的行为,违反「精确降级」不变量,故留待单独一期。
+- 外部调用面仍限于 `REENTRANCY_SINKS` 的低层调用,任意外部方法调用(`token.transfer(...)`)不在本期。
+
+### 测试与性能(目标 ~100% 覆盖)
+- 跨文件:`Base.sol` 声明状态、`Vault.sol` 继承并在外部调用后写 → 单文件 `detect` 不报、`detect_unit` 报。
+- 提前返回解除:子合约自身零状态变量的同一场景 → 仍报。
+- 消除遮蔽误报:局部与状态同名、调用后写局部 → 名字集合报、绑定图不报。
+- 回归:Phase 16 的既有用例全部维持原判。
+
+### 对抗式审查记录(Phase 24,3-lens workflow + 双证伪 agent,13 个 agent)
+
+三视角(false-positive / false-negative / navigation)并行,每条发现两个 agent 尝试证伪。**3 条确认、2 条被证伪、6 条低严重度未验证**。
+
+**确认 1+2(两个视角独立收敛)——Phase 23 缺陷类别复发**
+
+本期最初的正确性论证(见上)被证伪:带括号三元作左值时,首标识符是**条件**。实测:
+
+| 用例 | `detect_unit` | `detect` |
+|---|---|---|
+| 跨文件 `(useFirst ? a : b)[0] = 1`(`useFirst` 为继承状态,a/b 是 memory) | **true(误报)** | false |
+| 同文件同形态 | true | true |
+
+第二行说明**这处导航缺陷自 Phase 16 就存在**;Phase 24 的责任是把它**扩大到跨文件**,并且因为解除了 `state.is_empty()` 提前返回,让它能在此前根本不会触发的文件里发作。修复见上(边标签导航)。
+
+**确认 3 —— `.push`/`.pop` 把外部调用当成状态写入**
+
+`.push`/`.pop` 分支只看名字后缀与「基是否为状态变量」。若状态变量是**合约/接口类型**,`q.push(1)` 其实是一次外部方法调用,本合约什么都没写:
+
+```solidity
+contract QHolder { IQueue internal q; }
+contract QUser is QHolder {
+  function ping() external { (bool ok,) = msg.sender.call(""); q.push(1); }  // 误报
+}
+```
+
+同样是 Phase 16 起就有、被 Phase 24 扩到跨文件。修复:复用 `resolve_decl_type`,基解析为 `ContractLike` 时不计作状态写入(与 `detect_eth_transfer_send` 区分 `endpoint.send(payload)` 同一套机制)。配套反向用例钉住「继承来的真数组 `xs.push(1)` 仍要报」,确保没有连真发现一起压掉。
+
+**被证伪的 2 条**:storage 指针别名解析为 `VariableDeclarationStatement`(机制属实,但本期未改变任何判定)、单个文件触发 `too_deeply_nested` 导致整单元降级(可复现,但行为与改动前逐字节相同)。
+
+> 状态:✅ Phase 24 完成(reentrancy 的状态判定由「当前文件名字集合」升级为绑定图定义解析:跨文件继承状态可见、局部遮蔽误报消除、`state.is_empty()` 提前返回在有图时解除)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **663 测试** = 558 单元 + 105 集成,clippy 零告警(本机实测)。对抗式审查确认并修复 3 个问题,其中 2 个是 Phase 23 缺陷类别的复发。后续 Phase 25+:access-control 消除名字启发式;reentrancy 的任意外部方法调用面。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。

@@ -165,7 +165,7 @@ fn run_detectors(root: &Cursor, bg: Option<&Rc<BindingGraph>>) -> Vec<AstHit> {
     let mut hits = Vec::new();
     detect_tx_origin(root, &mut hits);
     detect_unchecked_call(root, &mut hits);
-    detect_reentrancy(root, &mut hits);
+    detect_reentrancy(root, bg, &mut hits);
     detect_access_control(root, &mut hits);
     detect_block_randomness(root, &mut hits);
     detect_ecrecover_zero_check(root, &mut hits);
@@ -727,10 +727,14 @@ fn has_reentrancy_guard(func: &Cursor) -> bool {
 }
 
 /// Detect external-call-before-state-write (CEI violation) per function.
-fn detect_reentrancy(root: &Cursor, hits: &mut Vec<AstHit>) {
+fn detect_reentrancy(root: &Cursor, bg: Option<&Rc<BindingGraph>>, hits: &mut Vec<AstHit>) {
     let state = state_variable_names(root);
-    if state.is_empty() {
-        return; // nothing to write unsafely
+    // Without a graph the name set is the only evidence there is, so an empty one
+    // means nothing here can be written unsafely. With a graph it proves nothing:
+    // a contract that declares no state of its own can still inherit all of it
+    // from a base in another file, which is exactly the case Phase 24 exists for.
+    if state.is_empty() && bg.is_none() {
+        return;
     }
     let mut fcur = root.clone();
     while fcur.go_to_next_nonterminal() {
@@ -756,7 +760,7 @@ fn detect_reentrancy(root: &Cursor, hits: &mut Vec<AstHit>) {
         let Some((call_off, call_line)) = earliest_external_call(&func) else {
             continue;
         };
-        if state_write_after(&func, &state, call_off) {
+        if state_write_after(&func, &state, call_off, bg) {
             hits.push(AstHit {
                 rule_id: "REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE",
                 line: call_line,
@@ -782,20 +786,122 @@ fn earliest_external_call(func: &Cursor) -> Option<(usize, usize)> {
     best
 }
 
+/// Whether the base of a write target is a state variable.
+///
+/// With a binding graph the identifier is resolved to its definition, which sees
+/// state declared in a base contract in another file and rejects a local that
+/// merely shares a state variable's name. When the graph cannot resolve the
+/// symbol — and on the no-graph path — this falls back to the current file's name
+/// set, i.e. the pre-Phase-24 answer, so an unresolved symbol never changes a
+/// verdict in either direction.
+///
+/// Only the *end* of the decision moved here: locating the lvalue base is still
+/// `base_identifier`, which is sound for these forms because assignment, postfix,
+/// prefix and member-access all put the operand first (unlike a conditional,
+/// whose condition precedes both values — the Phase 23 ship-blocker).
+fn writes_state(expr: &Cursor, state: &HashSet<String>, bg: Option<&Rc<BindingGraph>>) -> bool {
+    if let Some(g) = bg {
+        if let Some(ident) = lvalue_base_identifier(expr) {
+            if let Some(is_state) = resolves_to_state_variable(&ident, g) {
+                return is_state;
+            }
+        }
+    }
+    // Pre-Phase-24 answer, unchanged: the current file's name set, keyed on the
+    // first identifier in the expression.
+    base_identifier(expr).is_some_and(|b| state.contains(&b))
+}
+
+/// The identifier naming the location an lvalue writes to, or `None` when the
+/// shape does not name exactly one.
+///
+/// Navigation is by **edge label** — `LeftOperand` for an assignment, `Operand`
+/// for prefix/postfix/member-access — and then the identifier must *begin* that
+/// operand. "First `Identifier` terminal in the subtree" is not good enough: for
+/// `(c ? a : b)[0] = 1` it yields the condition `c`, and for `this.x` the member
+/// name `x`. Neither is the location being written, and feeding either to the
+/// binding graph is how the Phase 23 ship-blocker happened. Returning `None`
+/// keeps the caller on its old answer instead of resolving the wrong token.
+fn lvalue_base_identifier(expr: &Cursor) -> Option<Cursor> {
+    let mut c = expr.spawn();
+    let NodeKind::Nonterminal(k) = c.node().kind() else {
+        return None;
+    };
+    let label = match k {
+        NonterminalKind::AssignmentExpression => EdgeLabel::LeftOperand,
+        NonterminalKind::PrefixExpression
+        | NonterminalKind::PostfixExpression
+        | NonterminalKind::MemberAccessExpression => EdgeLabel::Operand,
+        _ => return None,
+    };
+    if !to_child(&mut c, label) {
+        return None;
+    }
+    let operand = squeeze(&c.node().unparse());
+    let ident = base_identifier_cursor(&c.spawn())?;
+    let name = ident.node().unparse();
+    // `bal[k]` and `s` are named by their leading identifier; `(c ? a : b)[0]`
+    // and `this.x` are not.
+    let begins_operand = operand.strip_prefix(&name).is_some_and(|rest| {
+        rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric() && ch != '_')
+    });
+    begins_operand.then_some(ident)
+}
+
+/// The cursor at a node's first `Identifier` terminal — the token
+/// [`base_identifier`] names, positioned so the binding graph can resolve it.
+fn base_identifier_cursor(node: &Cursor) -> Option<Cursor> {
+    let mut sub = node.clone();
+    if sub.go_to_next_terminal_with_kind(TerminalKind::Identifier) {
+        Some(sub)
+    } else {
+        None
+    }
+}
+
+/// True when the receiver of `.push`/`.pop` is a contract or interface instance:
+/// then this is an external method call, not an array mutation. `q.push(1)` on an
+/// `IQueue q` writes nothing in this contract. Only the graph knows the type, so
+/// without one the caller keeps its previous (over-reporting) answer.
+fn mutator_base_is_contract(expr: &Cursor, bg: Option<&Rc<BindingGraph>>) -> bool {
+    let (Some(g), Some(ident)) = (bg, lvalue_base_identifier(expr)) else {
+        return false;
+    };
+    matches!(resolve_decl_type(&ident, g), Some(ResolvedType::ContractLike))
+}
+
+/// `Some(true)` when the identifier resolves to a state variable, `Some(false)`
+/// when it resolves to something else (a local, a parameter), and `None` when the
+/// graph cannot resolve it — the caller then keeps the name-set answer.
+fn resolves_to_state_variable(ident: &Cursor, bg: &Rc<BindingGraph>) -> Option<bool> {
+    let reference = bg.reference_at(ident)?;
+    let def = reference.definitions().into_iter().next()?;
+    let BindingLocation::UserFile(loc) = def.definiens_location() else {
+        return None;
+    };
+    Some(matches!(
+        loc.cursor().node().kind(),
+        NodeKind::Nonterminal(NonterminalKind::StateVariableDefinition)
+    ))
+}
+
 /// True if a write to a state variable occurs at an offset strictly after
 /// `call_off`. Recognized write forms (lvalue base must be a state variable):
 ///   * assignment (`=`, `+=`, …) and postfix `x++`/`x--`;
 ///   * prefix `delete x` / `--x` / `++x` (not `!x`/`-x`/`~x`);
 ///   * tuple deconstruction `(…, stateVar, …) = …` (any LHS target);
 ///   * array mutators `stateArr.push(…)` / `stateArr.pop()`.
-fn state_write_after(func: &Cursor, state: &HashSet<String>, call_off: usize) -> bool {
+fn state_write_after(
+    func: &Cursor,
+    state: &HashSet<String>,
+    call_off: usize,
+    bg: Option<&Rc<BindingGraph>>,
+) -> bool {
     // Assignments and postfix `x++`/`x--`: the base is a state var.
     for kind in [NonterminalKind::AssignmentExpression, NonterminalKind::PostfixExpression] {
         let mut c = func.clone();
         while c.go_to_next_nonterminal_with_kind(kind) {
-            if c.text_offset().utf8 > call_off
-                && base_identifier(&c.spawn()).is_some_and(|b| state.contains(&b))
-            {
+            if c.text_offset().utf8 > call_off && writes_state(&c.spawn(), state, bg) {
                 return true;
             }
         }
@@ -808,7 +914,7 @@ fn state_write_after(func: &Cursor, state: &HashSet<String>, call_off: usize) ->
         }
         let text = squeeze(&c.node().unparse());
         let mutating = text.starts_with("delete") || text.starts_with("++") || text.starts_with("--");
-        if mutating && base_identifier(&c.spawn()).is_some_and(|b| state.contains(&b)) {
+        if mutating && writes_state(&c.spawn(), state, bg) {
             return true;
         }
     }
@@ -827,7 +933,8 @@ fn state_write_after(func: &Cursor, state: &HashSet<String>, call_off: usize) ->
         }
         let text = squeeze(&c.node().unparse());
         if (text.ends_with(".push") || text.ends_with(".pop"))
-            && base_identifier(&c.spawn()).is_some_and(|b| state.contains(&b))
+            && writes_state(&c.spawn(), state, bg)
+            && !mutator_base_is_contract(&c.spawn(), bg)
         {
             return true;
         }
@@ -3092,5 +3199,95 @@ mod tests {
         assert!(has(src, ARBITRARY_DC));
         assert!(!unit_has(src, ARBITRARY_DC));
     }
-}
 
+    // ---- Phase 24: reentrancy across files via the binding graph ----
+
+    const REENT: &str = "REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE";
+
+    /// Rule ids from a real multi-file compilation unit.
+    fn multi_rules(files: &[(&str, &str)]) -> Vec<&'static str> {
+        detect_unit(files)
+            .expect("unit builds")
+            .into_values()
+            .flatten()
+            .map(|h| h.rule_id)
+            .collect()
+    }
+
+    const BASE_SOL: &str = "pragma solidity ^0.8.0;\ncontract Base { mapping(address => uint) internal balances; }\n";
+
+    #[test]
+    fn inherited_state_write_across_files_is_reentrancy() {
+        // The textbook withdraw(): the state zeroed after the call lives in a base
+        // contract in another file, so the current file's name set never had it.
+        let vault = "pragma solidity ^0.8.0;\nimport \"./Base.sol\";\ncontract Vault is Base {\n  function withdraw() external {\n    (bool ok, ) = msg.sender.call{value: balances[msg.sender]}(\"\");\n    balances[msg.sender] = 0;\n  }\n}\n";
+        assert!(multi_rules(&[("Base.sol", BASE_SOL), ("Vault.sol", vault)]).contains(&REENT));
+        // Vault.sol alone — no base, no graph — cannot see it. That gap is the
+        // whole point of the compilation-unit path.
+        assert!(!has(vault, REENT));
+    }
+
+    #[test]
+    fn inherited_state_write_survives_the_empty_name_set_guard() {
+        // Vault declares no state of its own, so state_variable_names is empty for
+        // this file. The old early return bailed out before looking at the body.
+        let vault = "pragma solidity ^0.8.0;\nimport \"./Base.sol\";\ncontract Vault is Base {\n  function drain(address to) external {\n    (bool ok, ) = to.call(\"\");\n    balances[to] = 0;\n  }\n}\n";
+        assert!(multi_rules(&[("Base.sol", BASE_SOL), ("Vault.sol", vault)]).contains(&REENT));
+    }
+
+    #[test]
+    fn local_shadowing_a_state_var_is_not_a_state_write() {
+        // `total` inside the function is a local; writing it after the call is not
+        // a CEI violation, but a name-set membership test cannot tell them apart.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint total;\n  function f() external {\n    uint total = 1;\n    (bool ok, ) = msg.sender.call(\"\");\n    total = 2;\n    total;\n  }\n}\n";
+        assert!(has(src, REENT)); // name set: false positive
+        assert!(!unit_has(src, REENT)); // resolved: correctly silent
+    }
+
+    #[test]
+    fn same_file_state_write_still_fires_on_both_paths() {
+        // Phase 16 regression: the ordinary single-file case must be unchanged.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint total;\n  function f() external {\n    (bool ok, ) = msg.sender.call(\"\");\n    total = 2;\n  }\n}\n";
+        assert!(has(src, REENT));
+        assert!(unit_has(src, REENT));
+    }
+
+    #[test]
+    fn ternary_lvalue_does_not_resolve_the_condition() {
+        // `(useFirst ? a : b)[0] = 1` writes a MEMORY array element; nothing in
+        // storage is touched. Taking the first identifier in the subtree yields
+        // the condition `useFirst`, and resolving *that* to inherited state
+        // reported a reentrancy hit against safe code — the Phase 23 defect class
+        // recurring, caught by the Phase 24 review.
+        let base = "pragma solidity ^0.8.0;\ncontract Base { bool internal useFirst; }\n";
+        let vault = "pragma solidity ^0.8.0;\nimport \"./Base.sol\";\ncontract Vault is Base {\n  function notify(uint[] memory a, uint[] memory b) external {\n    (bool ok, ) = msg.sender.call(\"\");\n    require(ok);\n    (useFirst ? a : b)[0] = 1;\n  }\n}\n";
+        assert!(!multi_rules(&[("Base.sol", base), ("Vault.sol", vault)]).contains(&REENT));
+    }
+
+    #[test]
+    fn push_on_a_contract_typed_state_var_is_a_call_not_a_write() {
+        // `q.push(1)` where `q` is an interface instance is an external method
+        // call. The name/`.push` shape alone cannot tell it from a storage array
+        // mutation; the declared type can.
+        let holder = "pragma solidity ^0.8.0;\ninterface IQueue { function push(uint) external; }\ncontract QHolder { IQueue internal q; }\n";
+        let user = "pragma solidity ^0.8.0;\nimport \"./QHolder.sol\";\ncontract QUser is QHolder {\n  function ping() external {\n    (bool ok, ) = msg.sender.call(\"\");\n    require(ok);\n    q.push(1);\n  }\n}\n";
+        assert!(!multi_rules(&[("QHolder.sol", holder), ("QUser.sol", user)]).contains(&REENT));
+    }
+
+    #[test]
+    fn push_on_an_inherited_storage_array_is_still_a_write() {
+        // The counterpart: a real inherited storage array must keep firing, so the
+        // contract-type check above cannot be suppressing genuine findings.
+        let base = "pragma solidity ^0.8.0;\ncontract Base { uint[] internal xs; }\n";
+        let user = "pragma solidity ^0.8.0;\nimport \"./Base.sol\";\ncontract User is Base {\n  function ping() external {\n    (bool ok, ) = msg.sender.call(\"\");\n    require(ok);\n    xs.push(1);\n  }\n}\n";
+        assert!(multi_rules(&[("Base.sol", base), ("User.sol", user)]).contains(&REENT));
+    }
+
+    #[test]
+    fn cei_safe_order_still_silent_with_a_graph() {
+        // State written *before* the call is correct CEI and must stay unreported.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint total;\n  function f() external {\n    total = 2;\n    (bool ok, ) = msg.sender.call(\"\");\n    ok;\n  }\n}\n";
+        assert!(!has(src, REENT));
+        assert!(!unit_has(src, REENT));
+    }
+}
