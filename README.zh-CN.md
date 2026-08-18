@@ -406,7 +406,9 @@ cargo clippy --all-targets # 零告警
 cargo llvm-cov --ignore-filename-regex 'main\.rs' --show-missing-lines
 ```
 
-库代码（`src/` 除 `main.rs` 外）**行覆盖率约 98%**（3596 行中未覆盖 73 行）。`main.rs` 仅是
+库代码（`src/` 除 `main.rs` 外）**行覆盖率 97.74%**（10,769 行中未覆盖 243 行；区域 97.25%、函数 98.86%），
+由 CI 的 `coverage` job 每次推送实测。最大缺口是 `lib.rs` 90.78%（占未覆盖行的 103 行）——watch/monitor
+循环与多链 fan-out 的错误路径需真实链才能触达。`main.rs` 仅是
 9 行入口转发（解析参数 → 初始化日志 → 调 `run`），逻辑全在 `lib.rs` 中并被完整测试，故从指标中排除。
 剩余未覆盖行集中于三类**无法在「不访问真实网络」的单元测试中确定性触发**的防御性分支，均经人工审阅、
 行为都是"记告警并优雅降级（返回空 / 跳过）"：

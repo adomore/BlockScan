@@ -218,7 +218,9 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | 文档(docs/*.md + README) | **2,500+** | 9 份域设计文档 + 中/英用户手册 + 本文;见下索引 |
 
 - **生产 : 测试 ≈ 9,786 : 9,525**(单元 6,327 + 集成 3,198)≈ **1 : 0.97**。
-- **测试 637 个**(532 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 97.9%**(`audit.rs` 100%,`ast.rs` 97.0%,`mcp.rs` 97.6%;余未覆盖为防御性 `?`/不可达的 bool/Option 游标 API 守卫)。
+- **测试 637 个**(532 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 97.74%**(10,769 行中未覆盖 243 行;区域 97.25%、函数 98.86%)——由 CI 的 `coverage` job 实测,非手工维护。
+  - 11 个模块 100%(`audit`/`model`/`events`/`group`/`suppress`/`baseline`/`report`/`sarif`/`config`/`chains`/`throttle`);`ast.rs` 97.00%、`mcp.rs` 97.54%。
+  - 最大缺口是 **`lib.rs` 90.78%**(243 行未覆盖中占 103 行)——watch/monitor 循环与多链 fan-out 的错误路径需真实链才能触达;其余为防御性 `?`/不可达的游标 API 守卫。
 
 ---
 
