@@ -636,6 +636,51 @@ slang 1.3.6 的 `compilation::CompilationBuilder` + `CompilationBuilderConfig`(�
 
 > 状态:✅ Phase 22 完成(绑定图基础设施 + scope-aware 类型解析;消除 Phase 21 推迟的 `uint160(addrVar)`/`uint8(enumVar)`/`endpoint.send(payload)` 等类型相关 FP;三级 graceful degradation;`AST_RULES` 仍 8;检测器仍 36)。全量 **625 测试** = 521 单元 + 104 集成(Phase 22 收尾时的快照;其后的发布前加固审计又补了 12 个用例,当前总数为 **637** = 532 单元 + 105 集成,以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准);全工作区行覆盖 **97.9%**(`audit.rs` 100%,`ast.rs` 97.0%);clippy 零告警。后续 Phase 23+:绑定图扩到 reentrancy(跨函数/继承状态)、access-control;delegatecall 局部 alias 回溯。
 
+## Phase 23:绑定图扩面(一)——delegatecall 局部 alias 回溯 🔜
+
+**目标**:Phase 20 的 `DELEGATECALL_ARBITRARY_TARGET` 只在 delegatecall 的接收者**字面上就是形参名**时才报。真实的接管漏洞常常隔着一次局部赋值:
+
+```solidity
+function exec(address target, bytes calldata data) external {
+    address impl = target;      // 一次中转
+    impl.delegatecall(data);    // Phase 20 漏报:impl 不在形参名集合里
+}
+```
+
+Phase 22 已把绑定图接进 AST 层,本期用它把接收者**回溯到定义**,消除这类漏报。这是「选项 2」多期工程的第二期,只动一条规则,把绑定图从「读类型」推进到「读定义 + 跟数据流」。
+
+### 现在的不精确
+`detect_arbitrary_delegatecall` 用 `function_param_names(&func).contains(&receiver)` —— 纯名字集合匹配,两个方向都不准:
+- **漏报**:经任意局部变量中转即失效(上例)。这是 Parity 级接管,漏掉的代价最高。
+- **误报**:名字匹配**不区分作用域**。局部 `address target = address(this); target.delegatecall(…)` 若与某形参同名会被误报——固定地址的正常代理模式被判成任意接管。
+
+### 本期检测(精确)
+接收者标识符经绑定图 `reference_at → definitions → definiens_location` 解析到**声明节点**,按节点种类判定:
+
+| 声明节点 | 判定 | 理由 |
+|---|---|---|
+| `Parameter` | **报** | 形参可控 = 调用者可控;含 Phase 20 的直接情形,且**作用域正确** |
+| `VariableDeclarationStatement` | **回溯** | 取初始化表达式的基标识符递归,深度上限 `MAX_ALIAS_HOPS` |
+| `StateVariableDefinition` | 不报 | 固定实现地址,正常代理模式 |
+| 其他 / 无初始化 / 解析失败 | 不报 | 无信息时不制造误报 |
+
+### 净效果 / 不变量
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / SARIF 指纹语义**均不变**——只增精度。
+- **降级严格保持 Phase 20 语义**:`bg` 为 `None`(单文件 `detect` 路径、建图失败、跨文件未解析)时,回退到原有名字匹配,一行行为都不变。
+- 与泛化的 `DELEGATECALL_USAGE` 仍按 swc 去重,不重复计分。
+
+### 已知取舍(诚实声明)
+- 只回溯**直接赋值链**(`address t = param;`)。经数组/映射/结构体字段、函数返回值、`abi.decode` 中转的不追——这些需要真正的跨语句数据流,属后续。
+- 回溯深度封顶 `MAX_ALIAS_HOPS = 4`,超长链按未命中处理(**保守方向:不报**),避免病态输入放大解析成本。
+- 分支不敏感:`address t = cond ? param : fixed;` 只取基标识符,三元的形参侧不追 → 漏报。
+- 仍是单函数内的回溯;跨函数传递(`helper(target)` 内部 delegatecall)不在本期。
+
+### 测试与性能(目标 ~100% 覆盖)
+- 命中:一跳 alias、两跳 alias、直接形参(Phase 20 回归)。
+- 不命中:状态变量接收者、`address(this)` 局部、无初始化声明、超过深度上限的链。
+- **消除误报**:局部变量与形参同名(shadow)且初值为固定地址 → 不报(名字匹配会误报,绑定图不会)。
+- 降级:`detect`(无 bg)路径下行为与 Phase 20 逐条一致。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。

@@ -169,7 +169,7 @@ fn run_detectors(root: &Cursor, bg: Option<&Rc<BindingGraph>>) -> Vec<AstHit> {
     detect_access_control(root, &mut hits);
     detect_block_randomness(root, &mut hits);
     detect_ecrecover_zero_check(root, &mut hits);
-    detect_arbitrary_delegatecall(root, &mut hits);
+    detect_arbitrary_delegatecall(root, bg, &mut hits);
     detect_eth_transfer_send(root, bg, &mut hits);
     detect_narrowing_downcast(root, bg, &mut hits);
     hits
@@ -1101,11 +1101,20 @@ fn equality_has_zero(eq_unparse: &str) -> bool {
 // DELEGATECALL_ARBITRARY_TARGET (delegatecall to a caller-controlled address)
 // ---------------------------------------------------------------------------
 
-/// Flag a `delegatecall` whose receiver is a function parameter — an
+/// Flag a `delegatecall` whose receiver is caller-controlled — an
 /// attacker-controlled target means arbitrary code runs in this contract's
 /// storage context (full takeover). A fixed receiver (state var / immutable /
-/// call result / local) is the normal proxy pattern and is not flagged.
-fn detect_arbitrary_delegatecall(root: &Cursor, hits: &mut Vec<AstHit>) {
+/// call result / fixed local) is the normal proxy pattern and is not flagged.
+///
+/// With a binding graph (Phase 23) the receiver is resolved to its definition,
+/// so a parameter reached through local aliases (`address impl = target;`) is
+/// caught and a local that merely *shares a name* with a parameter is not.
+/// Without one, this falls back to Phase 20's parameter-name match.
+fn detect_arbitrary_delegatecall(
+    root: &Cursor,
+    bg: Option<&Rc<BindingGraph>>,
+    hits: &mut Vec<AstHit>,
+) {
     let mut c = root.clone();
     while c.go_to_next_nonterminal_with_kind(NonterminalKind::MemberAccessExpression) {
         if !squeeze(&c.node().unparse()).ends_with(".delegatecall") {
@@ -1113,7 +1122,14 @@ fn detect_arbitrary_delegatecall(root: &Cursor, hits: &mut Vec<AstHit>) {
         }
         let Some(receiver) = base_identifier(&c) else { continue };
         let Some((_, func)) = enclosing_function(&c) else { continue };
-        if function_param_names(&func).contains(&receiver) {
+        let controlled = match (bg, receiver_identifier(&c)) {
+            // Scope-aware: resolve the receiver to its declaration and follow
+            // any local alias chain back to a parameter.
+            (Some(g), Some(ident)) => traces_to_parameter(&ident, g, MAX_ALIAS_HOPS),
+            // No graph (single-file parse, build failure): Phase 20 behaviour.
+            _ => function_param_names(&func).contains(&receiver),
+        };
+        if controlled {
             hits.push(AstHit {
                 rule_id: "DELEGATECALL_ARBITRARY_TARGET",
                 line: c.text_range().start.line + 1,
@@ -1122,6 +1138,50 @@ fn detect_arbitrary_delegatecall(root: &Cursor, hits: &mut Vec<AstHit>) {
         }
     }
 }
+
+/// How many `address a = b;` hops the receiver may travel before we give up.
+/// Beyond this we report nothing rather than risk a pathological walk — the
+/// conservative direction for a chain nobody writes by hand.
+const MAX_ALIAS_HOPS: usize = 4;
+
+/// Whether `ident` resolves — directly or through local alias assignments — to a
+/// function parameter, i.e. to a value the caller chooses.
+///
+/// `Parameter` is the hit. A `VariableDeclarationStatement` is followed through
+/// its initializer's base identifier. Anything else (state variable, no
+/// initializer, unresolved) stops the walk without a finding.
+fn traces_to_parameter(ident: &Cursor, bg: &Rc<BindingGraph>, hops: usize) -> bool {
+    let Some(reference) = bg.reference_at(ident) else {
+        return false;
+    };
+    let Some(def) = reference.definitions().into_iter().next() else {
+        return false;
+    };
+    let BindingLocation::UserFile(loc) = def.definiens_location() else {
+        return false;
+    };
+    let decl = loc.cursor();
+    match decl.node().kind() {
+        NodeKind::Nonterminal(NonterminalKind::Parameter) => true,
+        NodeKind::Nonterminal(NonterminalKind::VariableDeclarationStatement) => {
+            if hops == 0 {
+                return false;
+            }
+            // The declaration's initializer, e.g. the `target` in `address impl = target;`.
+            let mut v = decl.spawn();
+            if !v.go_to_next_nonterminal_with_kind(NonterminalKind::VariableDeclarationValue) {
+                return false;
+            }
+            let mut inner = v.spawn();
+            if !inner.go_to_next_terminal_with_kind(TerminalKind::Identifier) {
+                return false;
+            }
+            traces_to_parameter(&inner, bg, hops - 1)
+        }
+        _ => false,
+    }
+}
+
 
 /// Names of the parameters declared by this function (each `Parameter`'s `Name`
 /// edge). A function-type parameter's own inner params may also appear — a
@@ -2920,5 +2980,78 @@ mod tests {
     fn normal_multi_operator_expression_not_rejected() {
         // A realistic expression stays well under MAX_EXPR_CHAIN.
         assert!(detect(&contract("uint x = a + b * c - d / e + f % g; x;")).is_some());
+    }
+
+    // ---- Phase 23: delegatecall local-alias backtracking ----
+
+    /// `exec(address target, bytes data)` with a `logic` state variable, so both
+    /// a caller-controlled and a fixed source are in scope for the receiver.
+    fn dc(body: &str) -> String {
+        format!(
+            "pragma solidity ^0.8.0;\ncontract C {{ address logic;\n  function exec(address target, bytes calldata data) external {{ {body} }}\n}}\n"
+        )
+    }
+
+    #[test]
+    fn delegatecall_through_one_alias_is_arbitrary() {
+        let src = dc("address a = target; a.delegatecall(data);");
+        assert!(unit_has(&src, ARBITRARY_DC));
+        // The Phase 20 name match cannot see through the alias — this is exactly
+        // the false negative the binding graph closes.
+        assert!(!has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn delegatecall_through_four_aliases_is_arbitrary() {
+        let src = dc("address a = target; address b = a; address c = b; address d = c; d.delegatecall(data);");
+        assert!(unit_has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn delegatecall_alias_chain_beyond_cap_is_not_flagged() {
+        // Five hops exceeds MAX_ALIAS_HOPS: stop walking rather than chase a
+        // chain nobody writes, and report nothing (the conservative direction).
+        let src = dc(
+            "address a = target; address b = a; address c = b; address d = c; address e = d; e.delegatecall(data);",
+        );
+        assert!(!unit_has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn delegatecall_to_param_still_fires_on_binding_path() {
+        // Phase 20's direct case must keep firing once resolution takes over.
+        let src = dc("target.delegatecall(data);");
+        assert!(unit_has(&src, ARBITRARY_DC));
+        assert!(has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn delegatecall_to_state_var_alias_is_not_arbitrary() {
+        // `logic` is fixed by the contract, not by the caller: the normal proxy.
+        let src = dc("address a = logic; a.delegatecall(data);");
+        assert!(!unit_has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn delegatecall_to_fixed_local_is_not_arbitrary() {
+        let src = dc("address a = address(this); a.delegatecall(data);");
+        assert!(!unit_has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn delegatecall_to_uninitialised_local_is_not_arbitrary() {
+        let src = dc("address a; a.delegatecall(data);");
+        assert!(!unit_has(&src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn function_type_param_name_no_longer_causes_a_false_positive() {
+        // `function_param_names` deliberately over-collects: a function-type
+        // parameter's own inner parameter names land in the set too. Here `impl`
+        // is such a name, while the actual receiver is a local fed from a state
+        // variable — the name match reports it, resolution does not.
+        let src = "pragma solidity ^0.8.0;\ncontract C { address logic;\n  function exec(function(address impl) external cb, bytes calldata data) external { address impl = logic; impl.delegatecall(data); cb; }\n}\n";
+        assert!(has(src, ARBITRARY_DC));
+        assert!(!unit_has(src, ARBITRARY_DC));
     }
 }
