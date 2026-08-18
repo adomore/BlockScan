@@ -354,9 +354,9 @@ Integration tests use `wiremock` to mock RPC and Etherscan/Blockscout/Sourcify/G
 cargo llvm-cov --ignore-filename-regex 'main\.rs' --show-missing-lines
 ```
 
-Workspace line coverage **97.76%** (10,833 lines, 243 uncovered) — measured by the `coverage` job in CI, not by hand, and gated there at 97%. Regions 97.27%, functions 98.86%.
+Workspace line coverage **97.76%** (regions 97.27%, functions 98.86%) — measured by the `coverage` job on every push and gated there at 97%, never maintained by hand. Only the percentage is recorded here: exact line counts shift with every commit, so that job's log is the source of truth.
 `audit.rs`, `model.rs`, `events.rs`, `group.rs`, `suppress.rs`, `baseline.rs`, `report.rs`, `sarif.rs`, `config.rs`, `chains.rs` and `throttle.rs` are at 100%; `ast.rs` 97.00%, `mcp.rs` 97.54%.
-The largest single gap is `lib.rs` at **91.28%** (103 of the 243 uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. The rest are defensive `?`/unreachable cursor-API guards.
+The largest single gap is `lib.rs` at **91.3%** (roughly four in ten of all uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. The rest are defensive `?`/unreachable cursor-API guards.
 
 ## Factory discovery (`--trace`)
 
