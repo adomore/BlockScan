@@ -344,7 +344,7 @@ Also exposes **resources**: `resources/list` lists each saved contract as `block
 ## Tests
 
 ```bash
-cargo test                 # 637 tests: 532 unit + 105 integration
+cargo test                 # 640 tests: 535 unit + 105 integration
 cargo clippy --all-targets # zero warnings
 ```
 
@@ -354,9 +354,9 @@ Integration tests use `wiremock` to mock RPC and Etherscan/Blockscout/Sourcify/G
 cargo llvm-cov --ignore-filename-regex 'main\.rs' --show-missing-lines
 ```
 
-Workspace line coverage **97.74%** (10,769 lines, 243 uncovered) — measured by the `coverage` job in CI, not by hand. Regions 97.25%, functions 98.86%.
+Workspace line coverage **97.76%** (10,833 lines, 243 uncovered) — measured by the `coverage` job in CI, not by hand, and gated there at 97%. Regions 97.27%, functions 98.86%.
 `audit.rs`, `model.rs`, `events.rs`, `group.rs`, `suppress.rs`, `baseline.rs`, `report.rs`, `sarif.rs`, `config.rs`, `chains.rs` and `throttle.rs` are at 100%; `ast.rs` 97.00%, `mcp.rs` 97.54%.
-The largest single gap is `lib.rs` at **90.78%** (103 of the 243 uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. The rest are defensive `?`/unreachable cursor-API guards.
+The largest single gap is `lib.rs` at **91.28%** (103 of the 243 uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. The rest are defensive `?`/unreachable cursor-API guards.
 
 ## Factory discovery (`--trace`)
 

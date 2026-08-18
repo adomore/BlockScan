@@ -207,20 +207,20 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 
 ## 代码量统计
 
-> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至提交 `8337d6b`)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
+> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至提交 `26dda60`)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
 
 | 类别 | 行数 | 备注 |
 |---|---|---|
 | **生产代码**(33 个 src 模块) | **9,786** | Top:`ast.rs` 1,512 · `audit.rs` 1,360 · `lib.rs` 1,315 · `mcp.rs` 905 · `rpc.rs` 497 · `scanner.rs` 444 · `cli.rs` 399 · `enrich.rs` 271 · `storage.rs` 259 · `model.rs` 226 |
-| **单元测试**(src 内联 `mod tests`) | **6,327** | 532 个用例,分布于各模块;Top:`ast.rs` 1,412 · `audit.rs` 761 · `mcp.rs` 442 · `storage.rs` 344 · `scanner.rs` 301 · `rpc.rs` 297 |
+| **单元测试**(src 内联 `mod tests`) | **6,401** | 535 个用例,分布于各模块;Top:`ast.rs` 1,412 · `audit.rs` 761 · `mcp.rs` 442 · `storage.rs` 344 · `lib.rs` 308 · `scanner.rs` 301 |
 | **集成测试** `tests/integration.rs` | **3,198** | 105 个用例(wiremock mock RPC/Etherscan/Blockscout/Sourcify/GitHub/Google/website/DefiLlama/TokenList/CoinGecko + 真二进制断言,含 MCP stdio + 本地 HTTP 往返) |
 | examples(链上小工具) | 96 | `analyze` 39 · `log_scan` 37 · `resolve_proxy` 20 |
 | 文档(docs/*.md + README) | **2,500+** | 9 份域设计文档 + 中/英用户手册 + 本文;见下索引 |
 
-- **生产 : 测试 ≈ 9,786 : 9,525**(单元 6,327 + 集成 3,198)≈ **1 : 0.97**。
-- **测试 637 个**(532 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 97.74%**(10,769 行中未覆盖 243 行;区域 97.25%、函数 98.86%)——由 CI 的 `coverage` job 实测,非手工维护。
+- **生产 : 测试 ≈ 9,786 : 9,599**(单元 6,401 + 集成 3,198)≈ **1 : 0.98**。
+- **测试 640 个**(535 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 97.76%**(10,833 行中未覆盖 243 行;区域 97.27%、函数 98.86%)——由 CI 的 `coverage` job 实测(@ `26dda60`),非手工维护;CI 门禁设在 97%。
   - 11 个模块 100%(`audit`/`model`/`events`/`group`/`suppress`/`baseline`/`report`/`sarif`/`config`/`chains`/`throttle`);`ast.rs` 97.00%、`mcp.rs` 97.54%。
-  - 最大缺口是 **`lib.rs` 90.78%**(243 行未覆盖中占 103 行)——watch/monitor 循环与多链 fan-out 的错误路径需真实链才能触达;其余为防御性 `?`/不可达的游标 API 守卫。
+  - 最大缺口是 **`lib.rs` 91.28%**(243 行未覆盖中占 103 行)——watch/monitor 循环与多链 fan-out 的错误路径需真实链才能触达;其余为防御性 `?`/不可达的游标 API 守卫。
 
 ---
 

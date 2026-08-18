@@ -1563,20 +1563,18 @@ mod tests {
         build_scanner(&build_chain_config(&g, 1, false)).unwrap().1
     }
 
+    /// Parses `DiscoverArgs` on its own rather than through `Command`, so the
+    /// helper needs no unreachable fallback arm for the other subcommands.
+    #[derive(Parser)]
+    struct DiscoverOnly {
+        #[command(flatten)]
+        args: DiscoverArgs,
+    }
+
     fn discover_args(extra: &[&str]) -> DiscoverArgs {
-        let mut argv = vec![
-            "blockscan",
-            "--rpc-url",
-            "http://127.0.0.1:1",
-            "--etherscan-key",
-            "k",
-            "discover",
-        ];
+        let mut argv = vec!["blockscan"];
         argv.extend_from_slice(extra);
-        match cli(&argv).command {
-            Command::Discover(a) => a,
-            _ => unreachable!("parsed a discover command"),
-        }
+        DiscoverOnly::parse_from(argv).args
     }
 
     #[test]
