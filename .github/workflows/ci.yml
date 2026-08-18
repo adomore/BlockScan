@@ -49,6 +49,6 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      # Measured at ~97.9%; the gate sits below that so ordinary churn does not
-      # trip it, but a real coverage regression does.
-      - run: cargo llvm-cov --locked --ignore-filename-regex 'main\.rs' --show-missing-lines --fail-under-lines 95
+      # CI-measured line coverage is 97.74%; the gate sits just below it so ordinary
+      # churn does not trip it, but a real coverage regression does.
+      - run: cargo llvm-cov --locked --ignore-filename-regex 'main\.rs' --show-missing-lines --fail-under-lines 97

@@ -1546,4 +1546,80 @@ mod tests {
         ]);
         assert!(run(c, std::future::ready(())).await.is_err());
     }
+
+    /// A scanner pointed at a closed port: every networked discovery source
+    /// fails fast, so only the no-network branches under test can emit anything.
+    fn offline_scanner() -> Scanner {
+        let g = cli(&[
+            "blockscan",
+            "--rpc-url",
+            "http://127.0.0.1:1",
+            "--etherscan-key",
+            "k",
+            "addresses",
+            "0xabc",
+        ])
+        .global;
+        build_scanner(&build_chain_config(&g, 1, false)).unwrap().1
+    }
+
+    fn discover_args(extra: &[&str]) -> DiscoverArgs {
+        let mut argv = vec![
+            "blockscan",
+            "--rpc-url",
+            "http://127.0.0.1:1",
+            "--etherscan-key",
+            "k",
+            "discover",
+        ];
+        argv.extend_from_slice(extra);
+        match cli(&argv).command {
+            Command::Discover(a) => a,
+            _ => unreachable!("parsed a discover command"),
+        }
+    }
+
+    #[test]
+    fn prepare_chain_rpc_skips_chain_without_rpc() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        // A secondary chain with no ETH_RPC_URL_<id> is skipped, not an error —
+        // a multichain run has to survive a chain the user has no endpoint for.
+        std::env::remove_var("ETH_RPC_URL_424242");
+        let g = cli(&[
+            "blockscan",
+            "--rpc-url",
+            "http://127.0.0.1:1",
+            "--etherscan-key",
+            "k",
+            "addresses",
+            "0xabc",
+        ])
+        .global;
+        assert!(prepare_chain_rpc(&g, 424242, true).unwrap().is_none());
+        // The primary chain still resolves from --rpc-url.
+        assert!(prepare_chain_rpc(&g, g.chain_id, true).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn discover_topic_without_valid_hash_skips_log_scan() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        // The range is well formed, but no --topic parses as a 32-byte hash, so
+        // the log scan is skipped rather than issuing an unfiltered eth_getLogs.
+        let args = discover_args(&["--topic", "not-a-hash", "--from", "1", "--to", "2"]);
+        assert!(discover_addresses(&offline_scanner(), &args)
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn discover_topic_without_range_skips_log_scan() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        // A valid topic but no --from/--to: there is no range to scan, so the
+        // log scan is skipped entirely.
+        let topic = format!("0x{}", "ab".repeat(32));
+        let args = discover_args(&["--topic", topic.as_str()]);
+        assert!(discover_addresses(&offline_scanner(), &args)
+            .await
+            .is_empty());
+    }
 }
