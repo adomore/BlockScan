@@ -18,3 +18,6 @@
 *.tar.gz.sha256
 *.zip
 *.exe
+
+# Scratch harnesses left behind by review subagents (never part of the suite)
+/tests/zz_*.rs
