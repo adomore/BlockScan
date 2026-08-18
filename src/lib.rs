@@ -594,7 +594,7 @@ pub fn run_audit(g: &GlobalArgs, args: &AuditArgs) -> error::Result<()> {
 /// Running tally of alerts: how many were emitted vs. suppressed by the baseline,
 /// and whether any underlying log/receipt fetch came back partial (so real-time
 /// `watch` knows not to advance past a block range it didn't fully scan).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct AlertCounts {
     pub emitted: usize,
     pub suppressed: usize,
