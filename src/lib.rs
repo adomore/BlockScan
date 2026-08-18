@@ -1620,4 +1620,118 @@ mod tests {
             .await
             .is_empty());
     }
+
+    /// Same trick as [`DiscoverOnly`], for the watch flags.
+    #[derive(Parser)]
+    struct WatchOnly {
+        #[command(flatten)]
+        args: WatchArgs,
+    }
+
+    #[test]
+    fn write_manifest_if_set_writes_manifest_and_clusters() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let tmp = tempfile::tempdir().unwrap();
+        let manifest = tmp.path().join("manifest.json");
+        let mut g = cli(&[
+            "blockscan",
+            "-o",
+            tmp.path().to_str().unwrap(),
+            "addresses",
+            "0xabc",
+        ])
+        .global;
+
+        // Without --manifest nothing is written at all.
+        write_manifest_if_set(&g).unwrap();
+        assert!(!manifest.exists());
+
+        // With --manifest, the clone-cluster file lands beside it rather than in
+        // the working directory, so a run never writes outside --out's neighbourhood.
+        g.manifest = Some(manifest.clone());
+        write_manifest_if_set(&g).unwrap();
+        assert!(manifest.exists());
+        assert!(tmp.path().join("clusters.json").exists());
+    }
+
+    #[test]
+    fn emit_run_output_sarif_and_multichain_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut g = cli(&[
+            "blockscan",
+            "-o",
+            tmp.path().to_str().unwrap(),
+            "addresses",
+            "0xabc",
+        ])
+        .global;
+        // Sarif mode emits a SARIF log built from this run's contracts.
+        g.format = OutputFormat::Sarif;
+        emit_run_output(&g, &RunStats::default(), &[], "addresses").unwrap();
+        // Json mode reports every scanned chain, not just the primary chain_id.
+        g.format = OutputFormat::Json;
+        g.chains = vec![1, 10];
+        emit_run_output(&g, &RunStats::default(), &[], "addresses").unwrap();
+    }
+
+    #[tokio::test]
+    async fn run_rejects_audit_filters_without_audit() {
+        // --min-risk filters on a score --no-audit never computes; refuse the
+        // combination instead of silently returning everything.
+        let c = cli(&[
+            "blockscan",
+            "--rpc-url",
+            "http://r",
+            "--etherscan-key",
+            "k",
+            "--no-audit",
+            "--min-risk",
+            "50",
+            "addresses",
+            "0xabc",
+        ]);
+        let err = run(c, std::future::ready(())).await.unwrap_err();
+        assert!(matches!(err, error::AppError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn run_discover_without_any_source_errors() {
+        // `discover` with no name and no --github/--website/--topic/... has
+        // nothing to discover from, so it fails before opening any connection.
+        let c = cli(&[
+            "blockscan",
+            "--rpc-url",
+            "http://r",
+            "--etherscan-key",
+            "k",
+            "discover",
+        ]);
+        let err = run(c, std::future::ready(())).await.unwrap_err();
+        assert!(matches!(err, error::AppError::Config(_)));
+    }
+
+    #[tokio::test]
+    async fn watch_alerts_multichain_without_any_rpc_errors() {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        // Every requested chain is secondary and has no ETH_RPC_URL_<id>, so each
+        // is skipped and nothing is left to watch — that must be an error, not a
+        // silently idle watcher.
+        std::env::remove_var("ETH_RPC_URL_424242");
+        std::env::remove_var("ETH_RPC_URL_424243");
+        let g = cli(&[
+            "blockscan",
+            "--rpc-url",
+            "http://127.0.0.1:1",
+            "--etherscan-key",
+            "k",
+            "addresses",
+            "0xabc",
+        ])
+        .global;
+        let args = WatchOnly::parse_from(["blockscan", "--alert-events"]).args;
+        let err = watch_alerts_multichain(&g, &[424242, 424243], true, args, std::future::ready(()))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, error::AppError::Config(_)));
+    }
 }
