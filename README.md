@@ -344,7 +344,7 @@ Also exposes **resources**: `resources/list` lists each saved contract as `block
 ## Tests
 
 ```bash
-cargo test                 # 670 tests: 565 unit + 105 integration
+cargo test                 # 673 tests: 568 unit + 105 integration
 cargo clippy --all-targets # zero warnings
 ```
 

@@ -870,6 +870,19 @@ fn leading_identifier(expr: &Cursor) -> Option<Cursor> {
         .then_some(ident)
 }
 
+/// Whether an expression denotes the caller. Two spellings mean the same thing:
+/// the literal `msg.sender`, and OpenZeppelin's `Context._msgSender()`, which
+/// ERC-2771 / meta-transaction contracts use everywhere in its place. Reading
+/// only the first credited no guard to a correctly guarded function and reported
+/// it as missing access control — `_msgSender()` appears in 10 of 42 corpus units.
+///
+/// Matched by convention name, not proven to return the caller: a contract that
+/// defines `_msgSender()` to mean something else gets credit for a guard it does
+/// not have. That direction suppresses a finding rather than inventing one.
+fn is_caller_expression(text: &str) -> bool {
+    text == "msg.sender" || text == "_msgSender()"
+}
+
 /// An expression that is *nothing but* one identifier (`owner`), as opposed to
 /// one merely led by an identifier (`cfg.admin`, `stakes[u].delegate`). Guard
 /// collection needs this stricter form: it records privilege per variable, and a
@@ -912,7 +925,7 @@ fn collect_guard_variables(root: &Cursor, bg: &Rc<BindingGraph>, out: &mut HashS
             {
                 continue;
             }
-            let sender = |x: &Cursor| squeeze(&x.node().unparse()) == "msg.sender";
+            let sender = |x: &Cursor| is_caller_expression(&squeeze(&x.node().unparse()));
             let other = match (sender(&l), sender(&r)) {
                 (true, false) => r,
                 (false, true) => l,
@@ -1180,24 +1193,28 @@ fn has_access_modifier(attrs: &Cursor) -> bool {
 /// purpose (prefer a false negative over flagging audited code), mirroring the
 /// heuristic's `has_access_guard`.
 fn has_msg_sender_guard(func: &Cursor) -> bool {
-    let mut c = func.clone();
-    while c.go_to_next_nonterminal_with_kind(NonterminalKind::MemberAccessExpression) {
-        if squeeze(&c.node().unparse()) != "msg.sender" {
-            continue;
-        }
-        for anc in c.ancestors() {
-            match anc.kind {
-                NonterminalKind::IfStatement
-                | NonterminalKind::WhileStatement
-                | NonterminalKind::EqualityExpression
-                | NonterminalKind::InequalityExpression => return true,
-                NonterminalKind::FunctionCallExpression => {
-                    let h = squeeze(&anc.unparse());
-                    if h.starts_with("require(") || h.starts_with("assert(") {
-                        return true;
+    // Two spellings of the same thing: `msg.sender` parses as a member access,
+    // `_msgSender()` as a call, so each needs its own walk.
+    for kind in [NonterminalKind::MemberAccessExpression, NonterminalKind::FunctionCallExpression] {
+        let mut c = func.clone();
+        while c.go_to_next_nonterminal_with_kind(kind) {
+            if !is_caller_expression(&squeeze(&c.node().unparse())) {
+                continue;
+            }
+            for anc in c.ancestors() {
+                match anc.kind {
+                    NonterminalKind::IfStatement
+                    | NonterminalKind::WhileStatement
+                    | NonterminalKind::EqualityExpression
+                    | NonterminalKind::InequalityExpression => return true,
+                    NonterminalKind::FunctionCallExpression => {
+                        let h = squeeze(&anc.unparse());
+                        if h.starts_with("require(") || h.starts_with("assert(") {
+                            return true;
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
     }
@@ -3482,4 +3499,35 @@ mod tests {
         assert!(!has(src, ACCESS));
         assert!(unit_has(src, ACCESS));
     }
+
+    // ---- Phase 26: the _msgSender() caller indirection ----
+
+    #[test]
+    fn a_msg_sender_helper_guard_counts_as_a_guard() {
+        // OpenZeppelin's Context indirection. The guard is intact; reading only
+        // the literal `msg.sender` reported this correctly-guarded admin function
+        // as missing access control.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  address owner;\n  uint total;\n  function _msgSender() internal view returns (address) { return msg.sender; }\n  function mint(uint n) external { require(_msgSender() == owner); total += n; }\n}\n";
+        assert!(!unit_has(src, ACCESS));
+        assert!(!has(src, ACCESS)); // the fix is not graph-dependent
+    }
+
+    #[test]
+    fn an_unguarded_privileged_fn_still_fires_alongside_the_helper() {
+        // The helper's presence must not blanket-suppress: `mint` here has no
+        // check at all, only a contract that happens to define _msgSender().
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint total;\n  function _msgSender() internal view returns (address) { return msg.sender; }\n  function mint(uint n) external { total += n; }\n}\n";
+        assert!(has(src, ACCESS));
+        assert!(unit_has(src, ACCESS));
+    }
+
+    #[test]
+    fn guard_variables_are_collected_through_the_helper_too() {
+        // Phase 25's guard set must see `owner` even when the comparison is
+        // written with the indirection, or `rotateSteward` goes unreported.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  address internal owner;\n  function _msgSender() internal view returns (address) { return msg.sender; }\n  function check() external view returns (bool) { return _msgSender() == owner; }\n  function rotateSteward(address a) external { owner = a; }\n}\n";
+        assert!(unit_has(src, ACCESS));
+    }
 }
+
+

@@ -915,6 +915,80 @@ units=42  degraded=0  access_by_name=31  access_guard_only=0
 
 > 状态:✅ Phase 25 完成(access-control 判据由「26 名字精确匹配」扩为「名字 ∪ 写入守卫变量」;守卫变量 = 单元内与 `msg.sender` 比较的**裸**状态变量,跨文件收集)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **670 测试** = 565 单元 + 105 集成,clippy 零告警(本机实测)。对抗式审查确认并修复 1 个覆盖面极广的误报类别,并纠正了本期立项依据。后续 Phase 26+:守卫按**完整访问路径**记录(恢复本期让出的召回)、`_msgSender()` / `hasRole` 形态、同文件三元左值的既有不精确。
 
+## Phase 26:识别 `_msgSender()` 调用者间接层 ✅
+
+### 立项前先测(吸取 Phase 25 的教训)
+Phase 25 的立项依据是个范畴错误——用「名字覆盖率」冒充「漏报率」,结果实测收益为 0。本期反过来:**先在真实语料上量化每个候选,再决定做哪个**。
+
+42 个合约单元的模式分布:
+
+| 模式 | 出现单元数 | 总次数 |
+|---|---|---|
+| **`_msgSender()`** | **10 / 42** | **97** |
+| `hasRole(` | 1 / 42 | 7 |
+| `onlyRole(` | 0 / 42 | 0 |
+| 守卫在结构体字段 | 1 / 42 | 1 |
+| 守卫在映射/索引 | 1 / 42 | 1 |
+
+原定的 Phase 26(守卫按完整访问路径记录,恢复 Phase 25 让出的召回)在语料上只有 **1 个单元 1 次**——与 Phase 25 同样的空头收益。**据此改选 `_msgSender()`**。
+
+### 缺陷:对正确代码误报
+`has_msg_sender_guard` 只认字面 `msg.sender`。OpenZeppelin 的 `Context._msgSender()` 是元交易(ERC-2771)标准间接层,用它写守卫的合约,守卫**看不见**:
+
+```solidity
+function mint(uint n) external {
+    require(_msgSender() == owner);   // 守卫完好
+    total += n;
+}
+```
+
+实测:字面 `msg.sender` 版本 → 不报(正确);`_msgSender()` 版本 → **报 `function mint`(误报)**。
+
+这是最糟的一类缺陷——**对正确加了鉴权的管理员函数报「缺少访问控制」**。
+
+**预估 vs 实测**:我按「文件里出现 `_msgSender()`」估了最多 3 条可消除,函数级实测只有 **1 条**(31 → 30)。代理指标再次高估——与 Phase 25 那个 62% 同类,只是这次方向无害。记在这里以免下次又拿文件级信号当函数级结论。
+
+### 本期改动
+把「调用者表达式」的判定收敛到一处 `is_caller_expression`,同时认 `msg.sender` 与 `_msgSender()`,并在两个使用点共用:
+- `has_msg_sender_guard`——守卫识别(消除上述误报)
+- `collect_guard_variables`——Phase 25 的守卫变量收集(`require(_msgSender() == owner)` 同样应让 `owner` 成为守卫变量)
+
+### 净效果 / 不变量
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / 指纹**不变**。
+- ~~只会减少发现,不会新增~~ —— **这条我写错了,经本期审查证伪**。`is_caller_expression` 有**两个**使用点,方向相反:
+  - `has_msg_sender_guard` → 多认出守卫 → **减少**发现
+  - `collect_guard_variables` → 多认出守卫变量 → 更多函数「因写入守卫变量」被判特权 → **增加**发现
+  反例就是本期自己新增的测试 `guard_variables_are_collected_through_the_helper_too`(断言 `rotateSteward` 被报出 = 一条新增),与该不变量在同一份文档里相隔数行。**实测净效果:语料 31 → 30(1 条移除、0 条新增)**;5/42 个单元的守卫变量集合确有扩大,但那些变量的写入方全是构造函数或 `onlyOwner` 守卫的函数,所以未产生新发现——**是模板巧合,不是不变量**。
+- 无绑定图路径同样受益:`has_msg_sender_guard` 不依赖绑定图。
+
+### 已知取舍(诚实声明)
+- **按约定名匹配,非语义验证**。`_msgSender()` 是 OpenZeppelin 约定;若某合约定义同名函数却返回别的东西,本期会把它当作调用者,从而**抑制掉一条本应报出的发现**(漏报)。代价方向已知:换取消除对正确代码的误报。
+- 只认 `_msgSender()` 这一个名字。`_txOrigin()`、自定义的 `_sender()` 等变体不认。
+- `hasRole(ROLE, msg.sender)` / `onlyRole(...)` 形态仍不算守卫变量来源(语料上 1/42,暂不值得)。
+- 守卫写在**非 `only*` 命名**的修饰符里时仍会误报(`modifier ownerOnly()`)。这是 Phase 25 起的既有缺陷,与调用者拼写无关;语料实测 0 次,根因与正解见审查记录。
+
+### 对抗式审查记录(Phase 26,3-lens workflow + 双证伪 agent;13 个 agent,5 个因 API 错误未完成)
+
+**确认:文档的不变量声明是假的**(详见上方「净效果」)。这是连续第四期文档声明被证伪,但性质与前三期不同——前三期错在**导航/粒度**(技术判断),这一期错在**我没有追踪自己改动的第二个使用点**。反例是我自己写的、正在通过的测试。
+
+**顺带确认一个继承来的误报类别**
+
+守卫写在**非 `only*` 命名**的修饰符里时(`modifier ownerOnly()`),两个检测都看不见:`has_access_modifier` 只认 `only*`/`auth`/`restrict` 名字,`has_msg_sender_guard` 不进入修饰符定义体。本地实测:
+
+| 用例 | 结果 |
+|---|---|
+| `ownerOnly` + `_msgSender()` | 报(误报) |
+| `ownerOnly` + 字面 `msg.sender` | **也报** |
+| `onlyOwner` + `_msgSender()` | 不报 ✓ |
+
+第二行确认这**不是本期引入**——Phase 25 起就如此,本期只是把它扩到第二种调用者拼写。语料实测该形态出现 **0 次**(五个受影响单元的修饰符全部是 `only*` 命名),故不在本期修,列为 Phase 27 候选。
+
+**根因与后续方向**:正解不是继续扩充修饰符名字清单,而是**把修饰符调用经绑定图解析到定义、检查其函数体内是否有调用者守卫**——与 Phase 24/25 用的是同一套机制。这样 `ownerOnly` / `authorized` / 任意命名都能覆盖,且不再依赖命名约定。
+
+**审查完整性声明**:13 个 agent 中 5 个因 API 错误未完成(其中若干是证伪侧),另有 1 个的安全分类器不可用。因此本轮的**证伪覆盖不完整**,上述结论均由我自行复现确认后才采纳;7 条低严重度发现未进入证伪。
+
+> 状态:✅ Phase 26 完成(`is_caller_expression` 同时识别 `msg.sender` 与 `_msgSender()`,供守卫识别与守卫变量收集共用)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **673 测试** = 568 单元 + 105 集成,clippy 零告警(本机实测)。语料实测 ACCESS 发现 31 → 30。后续 Phase 27+:**修饰符调用经绑定图解析到定义**(消除对 `only*` 命名约定的依赖);`hasRole` / 自定义错误守卫形态;守卫按完整访问路径记录。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。
