@@ -1176,6 +1176,16 @@ fn traces_to_parameter(ident: &Cursor, bg: &Rc<BindingGraph>, hops: usize) -> bo
             if !inner.go_to_next_terminal_with_kind(TerminalKind::Identifier) {
                 return false;
             }
+            // Only a *bare* alias (`address a = b;`) names the aliased value
+            // unambiguously. In any compound initializer the first identifier
+            // need not be the value at all: for `c ? x : y` slang orders the
+            // condition first, so a parameter used merely to pick a branch would
+            // be followed as if it were the delegatecall target — reporting a
+            // Critical takeover against a proxy whose targets are both fixed.
+            // Anything that is not exactly `= <identifier>` stops the walk.
+            if squeeze(&v.node().unparse()) != format!("={}", inner.node().unparse()) {
+                return false;
+            }
             traces_to_parameter(&inner, bg, hops - 1)
         }
         _ => false,
@@ -3045,6 +3055,34 @@ mod tests {
     }
 
     #[test]
+    fn ternary_condition_param_does_not_make_a_fixed_proxy_arbitrary() {
+        // Both branches are contract-fixed implementations; the parameter only
+        // selects between them. slang orders a ConditionalExpression's condition
+        // first, so following "the first identifier in the initializer" would
+        // resolve `useV2` — a parameter — and report a Critical takeover against
+        // an ordinary dual-implementation proxy. Adversarial review of Phase 23
+        // caught this as a ship-blocker; the bare-alias guard is what stops it.
+        let src = "pragma solidity ^0.8.0;\ncontract P { address v1; address v2;\n  function run(bool useV2, bytes calldata data) external { address impl = useV2 ? v2 : v1; impl.delegatecall(data); } }\n";
+        assert!(!unit_has(src, ARBITRARY_DC));
+        assert!(!has(src, ARBITRARY_DC));
+    }
+
+    #[test]
+    fn compound_initializers_are_not_followed() {
+        // Same guard, other shapes: a parameter appearing anywhere inside a
+        // non-bare initializer must not be mistaken for the aliased value.
+        for init in [
+            "n > 0 ? v1 : v2",     // comparison as the condition
+            "v1 == target ? v1 : v2", // parameter inside the condition
+        ] {
+            let src = format!(
+                "pragma solidity ^0.8.0;\ncontract P {{ address v1; address v2;\n  function run(address target, uint n, bytes calldata data) external {{ address impl = {init}; impl.delegatecall(data); }} }}\n"
+            );
+            assert!(!unit_has(&src, ARBITRARY_DC), "fired on `{init}`");
+        }
+    }
+
+    #[test]
     fn function_type_param_name_no_longer_causes_a_false_positive() {
         // `function_param_names` deliberately over-collects: a function-type
         // parameter's own inner parameter names land in the set too. Here `impl`
@@ -3055,3 +3093,4 @@ mod tests {
         assert!(!unit_has(src, ARBITRARY_DC));
     }
 }
+
