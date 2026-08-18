@@ -826,6 +826,95 @@ contract QUser is QHolder {
 
 > 状态:✅ Phase 24 完成(reentrancy 的状态判定由「当前文件名字集合」升级为绑定图定义解析:跨文件继承状态可见、局部遮蔽误报消除、`state.is_empty()` 提前返回在有图时解除)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **663 测试** = 558 单元 + 105 集成,clippy 零告警(本机实测)。对抗式审查确认并修复 3 个问题,其中 2 个是 Phase 23 缺陷类别的复发。后续 Phase 25+:access-control 消除名字启发式;reentrancy 的任意外部方法调用面。
 
+## Phase 25:绑定图扩面(三)——access-control 由名字清单升级为守卫变量写入 ✅
+
+**目标**:`ACCESS_MISSING_GUARD_PRIVILEGED_FN` 判定「这个函数是否特权」靠 `is_privileged_name`——**26 个名字的精确匹配**。这在真实语料上漏得很厉害。
+
+### 先量化(本地语料 out/,248 个 .sol,46 个合约)
+外部可调用、非 view 的函数名 153 个(出现 868 次)。其中「特权样貌」的 55 个 / 243 次:
+
+| | 名字数 | 出现次数 |
+|---|---|---|
+| 26 名单精确命中 | 9 | 93 |
+| **漏掉** | **46** | **150(约 62%)** |
+
+漏掉的高频项:`initialize`(31)、`setFeeTo`(13)、`setFeeToSetter`(13)、`setProtocolFee`、`updateDynamicLPFee`、`collectProtocolFees`……
+
+> ⚠️ **这个 62% 不是「漏报率」,当初拿它当立项依据是个范畴错误**(经本期对抗式审查暴露)。它衡量的是「名字清单匹配不到多少特权样貌的名字」,而不是「规则漏掉多少真实漏洞」——那 46 个名字里大多数要么**本来就有守卫**(会被正确跳过、不该报),要么**根本不是特权函数**(`setApprovalForAll`)。真实收益见下方「实测收益」。
+
+**但同一批数据也否掉了「简单扩大名单」这条路**:漏掉的里面有 `setApprovalForAll`(ERC-721/1155 标准,任何用户设自己的 operator)、`swapExactTokensForETH…`、`burnFrom`——**都不是特权函数**。按名字放宽会立刻制造误报。所以必须换语义判据。
+
+### 语义判据:写入「守卫变量」
+定义:**守卫变量** = 编译单元里被拿来与 `msg.sender` 比较的状态变量(`require(msg.sender == owner)`、`if (owner != msg.sender) revert`)。
+
+一个函数若**外部可调用、非 view、有实现、无守卫,却写入某个守卫变量**,那它就是在无鉴权地改变「谁有权限」——与它叫什么名字无关。
+
+这个判据在上面的数据上区分得恰到好处:
+- `setFeeToSetter` 写 `feeToSetter`,而 `feeToSetter` 正是 `require(msg.sender == feeToSetter)` 里的守卫 → **命中**(名单漏掉的)
+- `setApprovalForAll` 写的是 `_operatorApprovals[msg.sender][op]`,不是守卫变量 → **不报**(正确)
+- `setFeeTo` 自身带 `require(msg.sender == feeToSetter)` → 有守卫 → 不报(正确)
+
+**与名字清单取并集**,不做替换:纯增召回,不动既有检出。
+
+### 导航:复用 Phase 24 建立的正确范式
+守卫收集与写入判定都**按边标签导航**(`EqualityExpression`/`InequalityExpression` 的 `LeftOperand`/`RightOperand`,已实测确认),并要求标识符**位于操作数文本开头**——不满足就跳过。连续两期的确认缺陷都源于「取子树第一个标识符」,本期把该判断抽成单一助手 `leading_identifier`,由 `lvalue_base_identifier` 与守卫收集共用,不再各写一份。
+
+### 跨文件
+守卫变量在 `detect_unit` 里**先扫全部文件收集一遍**,再逐文件跑检测器——因为守卫往往定义在基合约(`Ownable`)所在的另一个文件里,而无守卫的写入在子合约文件里。
+
+### 实测收益:在现有语料上为 0(诚实声明)
+
+实现完成后,用真实编译单元路径跑了全部语料:
+
+```
+units=42  degraded=0  access_by_name=31  access_guard_only=0
+```
+
+**新判据贡献 0 条新发现。** 两种解读都要说清楚:
+
+- **有利**:语料是 42 个已审计、已上线的生产合约。本判据检出的是「无鉴权地改变谁有权限」这一**真实漏洞**;在没有该漏洞的代码上返回 0 是正确答案,同时说明**误报面在真实代码上实测为 0**。
+- **不利**:收益是**前瞻性的、未在真实数据上证实的**。机制正确不等于召回已兑现。
+
+结论:保留本期(语义正确、误报实测为 0、覆盖一个真实漏洞类别),但**不主张已兑现的召回收益**。
+
+### 净效果 / 不变量
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / 指纹**不变**。
+- 无绑定图时守卫集合为空,判定退化为「仅名字清单」= Phase 17 行为,逐行不变。
+- 与名字清单取并集 → 既有检出一条不少。
+
+### 已知取舍(诚实声明)
+- 守卫变量按**定义名**去重,不带合约身份:两个不同合约各有一个 `owner`、其中之一用作守卫时,另一个的写入也会被算作特权 → 可能误报。跨合约同名消解需要定义级身份,留待后续。
+- 只认 `msg.sender` 比较。`hasRole(ROLE, msg.sender)` / `onlyRole(...)` 形态的角色常量不算守卫变量(授予角色本身另有 `grantrole` 在名单里)。
+- 只看**直接赋值 / 前后缀**写入形态;元组解构与 `.push` 不计入特权判定。
+- 守卫只认**裸标识符**:`require(msg.sender == cfg.admin)` / `stakes[u].delegate` 不进守卫集合(见审查记录)。按完整访问路径记录可恢复这部分召回,留待后续。
+- 只认字面 `msg.sender`。OpenZeppelin 的 `_msgSender()` 间接层、`hasRole(ROLE, msg.sender)`、`require(admins[msg.sender])` 映射守卫均不算。
+
+### 对抗式审查记录(Phase 25,4-lens workflow + 双证伪 agent,14 个 agent)
+
+四视角(corpus-truth / false-positive / false-negative / invariants),其中 corpus-truth 专门要求在真实语料上量化。
+
+**确认的 ship-blocker —— 守卫集合的粒度错误**
+
+`collect_guard_variables` 用 `leading_identifier` 取比较另一侧的标识符。该助手对**左值**正确(`cfg.feeBps = b` 确实写入 `cfg`),但用在**读**操作数上语义反转:`msg.sender == cfg.admin` **不能**让整个 `cfg` 成为守卫。于是「写了守卫容器的任一字段」被当成「写了守卫」。
+
+本地实测(修复前):
+
+| 布局 | 结果 |
+|---|---|
+| 普通 `address admin` 守卫 | `[]` ✓ |
+| 守卫在结构体字段 `cfg.admin` | 误报 `setFeeBpsX` |
+| **AppStorage / diamond** | **3 条**,含普通 ERC-20 `transfer` |
+
+第三行是要害:diamond 模式把全部状态放在一个结构体变量后面,于是**单元内每个 public 函数都被报**——而这是 2021 年后 Solidity 的主流布局。
+
+**归因(采纳验证方的修正)**:这**不是** Phase 23/24 的「取错 token」。`leading_identifier` 在两个调用点都取对了;错的是**守卫集合按变量名记录**这一层的过度近似。所以该修的是键的粒度,不是助手。
+
+**修复**:守卫只认**裸标识符**(新增 `bare_identifier`);`cfg.admin` / `stakes[u].delegate` 这类形态不进守卫集合,对这些形状退回 Phase 17 行为。修复后实测 `member=0`、`appstorage=0`。
+
+**同一轮的第二个结论:立项依据站不住**(见「实测收益」)。审查测出新判据在语料上贡献 0 条,并指出开头那个 62% 是**名字覆盖率**而非漏报率。这条比代码缺陷更重要——它纠正的是我的推理,不是我的导航。
+
+> 状态:✅ Phase 25 完成(access-control 判据由「26 名字精确匹配」扩为「名字 ∪ 写入守卫变量」;守卫变量 = 单元内与 `msg.sender` 比较的**裸**状态变量,跨文件收集)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **670 测试** = 565 单元 + 105 集成,clippy 零告警(本机实测)。对抗式审查确认并修复 1 个覆盖面极广的误报类别,并纠正了本期立项依据。后续 Phase 26+:守卫按**完整访问路径**记录(恢复本期让出的召回)、`_msgSender()` / `hasRole` 形态、同文件三元左值的既有不精确。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。

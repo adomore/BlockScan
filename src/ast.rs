@@ -155,18 +155,24 @@ fn detect_inner(content: &str) -> Option<Vec<AstHit>> {
     }
     // Parse-only path: no binding graph, so type-resolution refinements are off
     // (the detectors fall back to their Phase 14–21 syntactic behavior).
-    Some(run_detectors(&out.create_tree_cursor(), None))
+    // No compilation unit here, so no guard variables can be collected: the
+    // access-control check falls back to the name list alone (Phase 17).
+    Some(run_detectors(&out.create_tree_cursor(), None, &HashSet::new()))
 }
 
 /// Run every AST detector over one file's tree root. `bg` carries the contract's
 /// binding graph when available (the `detect_unit` path), enabling scope-aware
 /// name/type resolution; it is `None` on the parse-only [`detect`] path.
-fn run_detectors(root: &Cursor, bg: Option<&Rc<BindingGraph>>) -> Vec<AstHit> {
+fn run_detectors(
+    root: &Cursor,
+    bg: Option<&Rc<BindingGraph>>,
+    guards: &HashSet<String>,
+) -> Vec<AstHit> {
     let mut hits = Vec::new();
     detect_tx_origin(root, &mut hits);
     detect_unchecked_call(root, &mut hits);
     detect_reentrancy(root, bg, &mut hits);
-    detect_access_control(root, &mut hits);
+    detect_access_control(root, bg, guards, &mut hits);
     detect_block_randomness(root, &mut hits);
     detect_ecrecover_zero_check(root, &mut hits);
     detect_arbitrary_delegatecall(root, bg, &mut hits);
@@ -211,13 +217,20 @@ fn detect_unit_inner(files: &[(&str, &str)]) -> Option<HashMap<String, Vec<AstHi
     }
     let unit = builder.build();
     let bg = unit.binding_graph();
-    let mut out = HashMap::with_capacity(paths.len());
+    // Guard variables are collected over the WHOLE unit before any detection:
+    // the access check that makes a variable a guard usually sits in a base
+    // contract (`Ownable`) in a different file from the unguarded write.
+    let mut guards = HashSet::new();
     for path in &paths {
         let file = unit.file(path)?;
         if !file.errors().is_empty() {
             return None; // a parse error anywhere → fall back to per-file path
         }
-        let hits = run_detectors(&file.create_tree_cursor(), Some(bg));
+        collect_guard_variables(&file.create_tree_cursor(), bg, &mut guards);
+    }
+    let mut out = HashMap::with_capacity(paths.len());
+    for path in &paths {
+        let hits = run_detectors(&unit.file(path)?.create_tree_cursor(), Some(bg), &guards);
         out.insert((*path).to_string(), hits);
     }
     Some(out)
@@ -837,15 +850,117 @@ fn lvalue_base_identifier(expr: &Cursor) -> Option<Cursor> {
     if !to_child(&mut c, label) {
         return None;
     }
-    let operand = squeeze(&c.node().unparse());
-    let ident = base_identifier_cursor(&c.spawn())?;
+    leading_identifier(&c)
+}
+
+/// The identifier an expression is *named by*, when it has one: `owner`, `bal[k]`
+/// and `a.b` are named by their leading identifier; `(c ? a : b)[0]` and `this.x`
+/// are not — their first identifier is a condition or a member name.
+///
+/// Both confirmed findings of the Phase 24 review, and the Phase 23
+/// ship-blocker, were the same mistake: treating "first `Identifier` terminal in
+/// the subtree" as the semantically meaningful one. This is the single place
+/// that judgement is made, so it cannot drift apart between call sites.
+fn leading_identifier(expr: &Cursor) -> Option<Cursor> {
+    let text = squeeze(&expr.node().unparse());
+    let ident = base_identifier_cursor(&expr.spawn())?;
     let name = ident.node().unparse();
-    // `bal[k]` and `s` are named by their leading identifier; `(c ? a : b)[0]`
-    // and `this.x` are not.
-    let begins_operand = operand.strip_prefix(&name).is_some_and(|rest| {
-        rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric() && ch != '_')
-    });
-    begins_operand.then_some(ident)
+    text.strip_prefix(&name)
+        .is_some_and(|rest| rest.chars().next().is_none_or(|ch| !ch.is_alphanumeric() && ch != '_'))
+        .then_some(ident)
+}
+
+/// An expression that is *nothing but* one identifier (`owner`), as opposed to
+/// one merely led by an identifier (`cfg.admin`, `stakes[u].delegate`). Guard
+/// collection needs this stricter form: it records privilege per variable, and a
+/// container is not privileged just because one of its fields is.
+fn bare_identifier(expr: &Cursor) -> Option<Cursor> {
+    let ident = base_identifier_cursor(&expr.spawn())?;
+    (ident.node().unparse() == squeeze(&expr.node().unparse())).then_some(ident)
+}
+
+/// The declared name of the state variable an identifier resolves to; `None` when
+/// it resolves to a local, a parameter, or cannot be resolved at all.
+fn resolved_state_variable_name(ident: &Cursor, bg: &Rc<BindingGraph>) -> Option<String> {
+    let reference = bg.reference_at(ident)?;
+    let def = reference.definitions().into_iter().next()?;
+    let BindingLocation::UserFile(loc) = def.definiens_location() else {
+        return None;
+    };
+    let decl = loc.cursor();
+    match decl.node().kind() {
+        NodeKind::Nonterminal(NonterminalKind::StateVariableDefinition) => {
+            definition_name(&decl.spawn())
+        }
+        _ => None,
+    }
+}
+
+/// State variables an access check compares against `msg.sender`
+/// (`require(msg.sender == owner)`, `if (owner != msg.sender) revert`). Writing
+/// one of these changes *who is privileged*, whatever the function is named — the
+/// signal `is_privileged_name`'s 26-name list cannot see.
+///
+/// Collected over the whole compilation unit, because the guard usually lives in
+/// a base contract (`Ownable`) in a different file from the unguarded write.
+fn collect_guard_variables(root: &Cursor, bg: &Rc<BindingGraph>, out: &mut HashSet<String>) {
+    for kind in [NonterminalKind::EqualityExpression, NonterminalKind::InequalityExpression] {
+        let mut c = root.clone();
+        while c.go_to_next_nonterminal_with_kind(kind) {
+            let (mut l, mut r) = (c.spawn(), c.spawn());
+            if !to_child(&mut l, EdgeLabel::LeftOperand) || !to_child(&mut r, EdgeLabel::RightOperand)
+            {
+                continue;
+            }
+            let sender = |x: &Cursor| squeeze(&x.node().unparse()) == "msg.sender";
+            let other = match (sender(&l), sender(&r)) {
+                (true, false) => r,
+                (false, true) => l,
+                _ => continue, // neither side is msg.sender, or both are
+            };
+            // Only a *bare* state variable counts. `leading_identifier` is right
+            // for an lvalue — `cfg.feeBps = b` really does write into `cfg` — but
+            // the direction inverts on a read: comparing `cfg.admin` to
+            // `msg.sender` does not make all of `cfg` a guard. Recording `cfg`
+            // would make every write to any sibling field a privilege change, and
+            // on the AppStorage/diamond layout, where all state sits behind one
+            // struct, that is every public function in the unit.
+            if let Some(name) = bare_identifier(&other)
+                .and_then(|i| resolved_state_variable_name(&i, bg))
+            {
+                out.insert(name);
+            }
+        }
+    }
+}
+
+/// True if the function assigns to a state variable that some access check in
+/// this unit compares against `msg.sender`.
+fn writes_guard_variable(
+    func: &Cursor,
+    guards: &HashSet<String>,
+    bg: Option<&Rc<BindingGraph>>,
+) -> bool {
+    let Some(g) = bg else { return false };
+    if guards.is_empty() {
+        return false;
+    }
+    for kind in [
+        NonterminalKind::AssignmentExpression,
+        NonterminalKind::PrefixExpression,
+        NonterminalKind::PostfixExpression,
+    ] {
+        let mut c = func.clone();
+        while c.go_to_next_nonterminal_with_kind(kind) {
+            if lvalue_base_identifier(&c.spawn())
+                .and_then(|i| resolved_state_variable_name(&i, g))
+                .is_some_and(|n| guards.contains(&n))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The cursor at a node's first `Identifier` terminal — the token
@@ -960,12 +1075,23 @@ fn tuple_lhs_writes_state(stmt: &str, state: &HashSet<String>) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Flag a privileged-named, public/external function that has no access guard.
-fn detect_access_control(root: &Cursor, hits: &mut Vec<AstHit>) {
+fn detect_access_control(
+    root: &Cursor,
+    bg: Option<&Rc<BindingGraph>>,
+    guards: &HashSet<String>,
+    hits: &mut Vec<AstHit>,
+) {
     let mut fcur = root.clone();
     while fcur.go_to_next_nonterminal_with_kind(NonterminalKind::FunctionDefinition) {
         let func = fcur.spawn();
         let Some(name) = definition_name(&func) else { continue };
-        if !crate::audit::is_privileged_name(&name.to_ascii_lowercase()) {
+        // Privileged by name (Phase 17's 26-name list) *or* by what it writes: a
+        // function that assigns the variable an access check tests against
+        // `msg.sender` changes who is privileged, whatever it is called. The union
+        // only adds recall — no previously reported function stops being reported.
+        if !crate::audit::is_privileged_name(&name.to_ascii_lowercase())
+            && !writes_guard_variable(&func, guards, bg)
+        {
             continue;
         }
         // Skip pure declarations (interface / abstract `function f() external;`):
@@ -3289,5 +3415,71 @@ mod tests {
         let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint total;\n  function f() external {\n    total = 2;\n    (bool ok, ) = msg.sender.call(\"\");\n    ok;\n  }\n}\n";
         assert!(!has(src, REENT));
         assert!(!unit_has(src, REENT));
+    }
+
+    // ---- Phase 25: access control by guard-variable writes ----
+
+    /// A base contract whose `owner` is compared against `msg.sender`, so `owner`
+    /// is a guard variable for the whole unit.
+    const OWNABLE_SOL: &str = "pragma solidity ^0.8.0;\ncontract Ownable {\n  address internal owner;\n  modifier onlyOwner() { require(msg.sender == owner); _; }\n}\n";
+
+    #[test]
+    fn arbitrarily_named_guard_writer_is_privileged_across_files() {
+        // `rotateSteward` is in no name list, and the guard that makes `owner`
+        // privileged lives in another file — but assigning it without a check is
+        // an unauthenticated ownership takeover.
+        let child = "pragma solidity ^0.8.0;\nimport \"./Ownable.sol\";\ncontract Child is Ownable {\n  function rotateSteward(address a) external { owner = a; }\n}\n";
+        assert!(multi_rules(&[("Ownable.sol", OWNABLE_SOL), ("Child.sol", child)]).contains(&ACCESS));
+        // The name list alone cannot see it: this is the recall the phase adds.
+        assert!(!has(child, ACCESS));
+    }
+
+    #[test]
+    fn writing_a_non_guard_state_var_is_not_privileged() {
+        // The shape that ruled out simply widening the name list: setApprovalForAll
+        // writes per-caller state every user is meant to set for themselves.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  address internal owner;\n  mapping(address => mapping(address => bool)) internal approvals;\n  modifier onlyOwner() { require(msg.sender == owner); _; }\n  function setApprovalForAll(address op, bool ok) external { approvals[msg.sender][op] = ok; }\n}\n";
+        assert!(!unit_has(src, ACCESS));
+    }
+
+    #[test]
+    fn a_guarded_guard_writer_is_still_skipped() {
+        // Writing `owner` behind a msg.sender check is the correct pattern.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  address internal owner;\n  function handOver(address a) external { require(msg.sender == owner); owner = a; }\n}\n";
+        assert!(!unit_has(src, ACCESS));
+    }
+
+    #[test]
+    fn a_struct_field_guard_does_not_privilege_its_siblings() {
+        // `cfg.admin` guards; `cfg.feeBps` is an unrelated sibling. Recording the
+        // guard as `cfg` would make writing any field of it a privilege change.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  struct Config { address admin; uint16 feeBps; }\n  Config internal cfg;\n  function rescueX() external { require(msg.sender == cfg.admin); }\n  function setFeeBpsX(uint16 b) external { cfg.feeBps = b; }\n}\n";
+        assert!(!unit_has(src, ACCESS));
+    }
+
+    #[test]
+    fn app_storage_layout_does_not_privilege_every_function() {
+        // The diamond/AppStorage pattern puts *all* state behind one struct
+        // variable, so a container-granular guard set would report every public
+        // function in the unit — including a plain ERC-20 transfer.
+        let src = "pragma solidity ^0.8.0;\nstruct AppStorage { address owner; uint fee; mapping(address => uint) bal; }\ncontract AdminFacet {\n  AppStorage internal s;\n  function setOwner2(address a) external { require(msg.sender == s.owner); s.owner = a; }\n}\ncontract TokenFacet {\n  AppStorage internal s;\n  function transfer(address to, uint v) external { s.bal[msg.sender] -= v; s.bal[to] += v; }\n  function bumpFee() external { s.fee += 1; }\n}\n";
+        assert!(!unit_has(src, ACCESS));
+    }
+
+    #[test]
+    fn guard_variable_recall_does_not_disturb_the_name_list() {
+        // A 26-name case with no guard variable in sight must behave as before on
+        // both paths — the union only adds.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  uint public total;\n  function mint(uint n) external { total += n; }\n}\n";
+        assert!(has(src, ACCESS));
+        assert!(unit_has(src, ACCESS));
+    }
+
+    #[test]
+    fn without_a_graph_guard_variables_are_invisible() {
+        // Exact degradation: no unit, no guard set, so only the name list applies.
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  address internal owner;\n  modifier onlyOwner() { require(msg.sender == owner); _; }\n  function rotateSteward(address a) external { owner = a; }\n}\n";
+        assert!(!has(src, ACCESS));
+        assert!(unit_has(src, ACCESS));
     }
 }
