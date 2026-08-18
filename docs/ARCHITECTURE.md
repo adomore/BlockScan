@@ -207,17 +207,17 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 
 ## 代码量统计
 
-> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至 audit Phase 22)。
+> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至提交 `8337d6b`)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
 
 | 类别 | 行数 | 备注 |
 |---|---|---|
-| **生产代码**(33 个 src 模块) | **9,784** | Top:`ast.rs` 1,512 · `audit.rs` 1,360 · `lib.rs` 1,315 · `mcp.rs` 905 · `rpc.rs` 494 · `scanner.rs` 442 · `cli.rs` 399 · `enrich.rs` 266 · `storage.rs` 254 · `model.rs` 226 |
-| **单元测试**(src 内联 `mod tests`) | **6,303** | 532 个用例,分布于各模块;Top:`ast.rs` 1,412 · `audit.rs` 761 · `mcp.rs` 440 · `storage.rs` 320 · `scanner.rs` 301 · `rpc.rs` 297 |
+| **生产代码**(33 个 src 模块) | **9,786** | Top:`ast.rs` 1,512 · `audit.rs` 1,360 · `lib.rs` 1,315 · `mcp.rs` 905 · `rpc.rs` 497 · `scanner.rs` 444 · `cli.rs` 399 · `enrich.rs` 271 · `storage.rs` 259 · `model.rs` 226 |
+| **单元测试**(src 内联 `mod tests`) | **6,327** | 532 个用例,分布于各模块;Top:`ast.rs` 1,412 · `audit.rs` 761 · `mcp.rs` 442 · `storage.rs` 344 · `scanner.rs` 301 · `rpc.rs` 297 |
 | **集成测试** `tests/integration.rs` | **3,198** | 105 个用例(wiremock mock RPC/Etherscan/Blockscout/Sourcify/GitHub/Google/website/DefiLlama/TokenList/CoinGecko + 真二进制断言,含 MCP stdio + 本地 HTTP 往返) |
 | examples(链上小工具) | 96 | `analyze` 39 · `log_scan` 37 · `resolve_proxy` 20 |
 | 文档(docs/*.md + README) | **2,500+** | 9 份域设计文档 + 中/英用户手册 + 本文;见下索引 |
 
-- **生产 : 测试 ≈ 9,784 : 9,501**(单元 6,303 + 集成 3,198)≈ **1 : 0.97**。
+- **生产 : 测试 ≈ 9,786 : 9,525**(单元 6,327 + 集成 3,198)≈ **1 : 0.97**。
 - **测试 637 个**(532 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 97.9%**(`audit.rs` 100%,`ast.rs` 97.0%,`mcp.rs` 97.6%;余未覆盖为防御性 `?`/不可达的 bool/Option 游标 API 守卫)。
 
 ---
