@@ -667,7 +667,11 @@ fn scan_source_file(path: &str, content: &str, out: &mut Vec<RawHit>) {
             out.push(RawHit { rule_id: rid, detection: "source", location: Some(loc.clone()), evidence: ev() });
         }
         // Cross-line: unprotected initialize() — look ahead to the body `{` for a guard.
-        if code.contains("function initialize(") && !initializer_guarded(&stripped, i) {
+        if code.contains("function initialize(")
+            && initializer_has_body(&stripped, i)
+            && initializer_is_reachable(&stripped, i)
+            && !initializer_guarded(&stripped, i)
+        {
             out.push(RawHit {
                 rule_id: "PROXY_UNPROTECTED_INITIALIZER",
                 detection: "source",
@@ -1020,16 +1024,103 @@ fn flashloan_authed(sig: &str, body: &str) -> bool {
 
 /// True if an `initializer`/`reinitializer`/`onlyInitializing` guard appears between
 /// the `function initialize(` line and the first `{` that opens its body.
-fn initializer_guarded(lines: &[String], start: usize) -> bool {
+/// Whether the `function initialize(` at `start` opens a body, as opposed to
+/// being a bodiless declaration in an interface or an abstract contract.
+///
+/// A declaration has nothing to guard and cannot be called, so reporting one is
+/// pure noise — measured on the corpus, 16 of the 17 findings this rule produced
+/// were interface declarations (`function initialize(address, address) external;`
+/// in `UniswapV2Pair`, `IPoolManager`, `IUniswapV3PoolActions`).
+///
+/// Scanning forward from the signature, whichever of `;` and `{` comes first
+/// decides: `;` ends a declaration, `{` opens a body. Both can appear on one line
+/// (`function initialize(address a) external { x = a; }`), so their order within
+/// the line matters, and a signature may wrap across several lines before either
+/// shows up.
+fn initializer_has_body(lines: &[String], start: usize) -> bool {
     for line in &lines[start..] {
-        if line.contains("initializer") || line.contains("onlyInitializing") {
-            return true; // covers initializer / reinitializer / onlyInitializing
-        }
-        if line.contains('{') {
-            return false; // body opened without a guard
+        match (line.find('{'), line.find(';')) {
+            (Some(brace), Some(semi)) => return brace < semi,
+            (Some(_), None) => return true,
+            (None, Some(_)) => return false,
+            (None, None) => {}
         }
     }
     false
+}
+
+fn initializer_guarded(lines: &[String], start: usize) -> bool {
+    let mut opened = false;
+    let mut depth = 0usize;
+    for line in &lines[start..] {
+        // On the signature: an OpenZeppelin-style modifier.
+        if line.contains("initializer") || line.contains("onlyInitializing") {
+            return true; // covers initializer / reinitializer / onlyInitializing
+        }
+        // In the body: a caller check does the same job. UniswapV2Pair guards its
+        // initialize with `require(msg.sender == factory)` and says so in a comment
+        // — reporting it was the rule's second-largest false-positive class.
+        if opened && is_caller_check(line) {
+            return true;
+        }
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if opened && depth == 0 {
+                        return false; // function ended, no guard seen
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Whether a line *checks* the caller, as opposed to merely mentioning it.
+/// `require(msg.sender == factory)` is a guard; `owner = msg.sender` is the
+/// archetypal unprotected initializer this rule exists to catch, and reading the
+/// mere presence of `msg.sender` as a guard silently suppressed it.
+fn is_caller_check(line: &str) -> bool {
+    let caller = line.contains("msg.sender") || line.contains("_msgSender()");
+    caller
+        && (line.contains("require(")
+            || line.contains("assert(")
+            || line.contains("if(")
+            || line.contains("if ("))
+}
+
+/// Whether an attacker could call this `initialize` at all, and whether calling it
+/// could do anything. An `internal`/`private` function is unreachable from
+/// outside, and a `view`/`pure` one initializes nothing — Uniswap V4's
+/// `PositionInfoLibrary.initialize(...) internal pure` is both.
+fn initializer_is_reachable(lines: &[String], start: usize) -> bool {
+    let sig = initializer_signature(lines, start);
+    let has = |w: &str| {
+        sig.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .any(|t| t == w)
+    };
+    (has("external") || has("public")) && !has("view") && !has("pure")
+}
+
+/// The signature text of the `function initialize(` at `start`: everything up to
+/// the body brace or the declaration semicolon, joined across wrapped lines.
+fn initializer_signature(lines: &[String], start: usize) -> String {
+    let mut sig = String::new();
+    for line in &lines[start..] {
+        let end = line.find('{').unwrap_or(line.len());
+        sig.push_str(&line[..end]);
+        sig.push(' ');
+        if line.contains('{') || line.contains(';') {
+            break;
+        }
+    }
+    sig
 }
 
 /// Detectors that fire on a single comment-/string-stripped source line.
@@ -1499,6 +1590,53 @@ mod tests {
     }
 
     #[test]
+    fn initializer_declaration_in_an_interface_is_not_reported() {
+        // An interface declaration has no body: nothing to guard, nothing callable.
+        // 16 of this rule's 17 corpus findings were exactly this — UniswapV2Pair's
+        // `IUniswapV2Pair.initialize`, `IPoolManager`, `IUniswapV3PoolActions`.
+        let (d, s) = verified("interface I {
+  function initialize(address, address) external;
+}", "v0.8.20");
+        assert!(!ids(&audit(&d, &s)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
+        // Wrapped across lines, the semicolon arriving well after the signature.
+        let (d2, s2) = verified("interface I {
+  function initialize(
+    uint160 p
+  ) external returns (int24);
+}", "v0.8.20");
+        assert!(!ids(&audit(&d2, &s2)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
+    }
+
+    #[test]
+    fn unreachable_or_stateless_initializer_is_not_reported() {
+        // `internal pure` cannot be called from outside and initializes nothing —
+        // Uniswap V4's PositionInfoLibrary.initialize is both.
+        let (d, s) = verified("library L {
+  function initialize(uint a) internal pure returns (uint) { return a; }
+}", "v0.8.20");
+        assert!(!ids(&audit(&d, &s)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
+    }
+
+    #[test]
+    fn a_caller_check_guards_an_initializer_but_an_assignment_does_not() {
+        // UniswapV2Pair guards with a require, not an OpenZeppelin modifier.
+        let guarded = "function initialize(address a) external {
+  require(msg.sender == factory, 'FORBIDDEN');
+  token0 = a;
+}";
+        let (d, s) = verified(guarded, "v0.8.20");
+        assert!(!ids(&audit(&d, &s)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
+        // But merely *mentioning* the caller is not a check: `owner = msg.sender`
+        // in an open initializer is the archetypal takeover this rule exists for.
+        // Reading presence as a guard silently suppressed it.
+        let open = "function initialize() public virtual {
+  owner = msg.sender;
+}";
+        let (d2, s2) = verified(open, "v0.8.20");
+        assert!(ids(&audit(&d2, &s2)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
+    }
+
+    #[test]
     fn corrected_swc_mappings() {
         let (d, s) = verified("function f() public { address a = ecrecover(h, v, r, ss); }", "v0.7.6");
         let fs = audit(&d, &s).findings;
@@ -1862,11 +2000,12 @@ mod tests {
     }
 
     #[test]
-    fn initialize_without_body_brace_is_unguarded() {
-        // `function initialize(` as the last line with no following `{` -> the guard
-        // look-ahead falls through the loop (no brace, no modifier) and reports it.
+    fn initialize_without_body_brace_is_not_reported() {
+        // `function initialize(` as the last line: no body, no visibility keyword.
+        // A truncated fragment is not evidence of an unprotected initializer, so
+        // reporting it was noise. Before Phase 29 this fired.
         let (d, s) = verified("contract C {\n  function initialize(", "v0.8.20");
-        assert!(ids(&audit(&d, &s)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
+        assert!(!ids(&audit(&d, &s)).contains(&"PROXY_UNPROTECTED_INITIALIZER".to_string()));
     }
 
     #[test]

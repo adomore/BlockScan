@@ -1150,6 +1150,79 @@ p = abi.encodeCall(IPair(a).approve, (a, n));       // 只构造 calldata
 
 > 状态:✅ Phase 28 完成(转换接收者 `IThing(addr).m()` 纳入重入面;调用位闸门为审查所必需)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **686 测试** = 581 单元 + 105 集成,clippy 零告警(本机实测)。**语料发现增量为 0**,唯一可测改善是 `UNIv4.sol` 锚点 395 → 394。后续 Phase 29+:`arr[i].m()`(90 次)/ `a.b.m()`(107 次)接收者;守卫按完整访问路径;函数返回的合约实例。
 
+## Phase 29:`PROXY_UNPROTECTED_INITIALIZER` 精度修复 ✅
+
+### 立项:一次测量否掉了原计划,又指出了真问题
+归档的 Phase 29 是继续做接收者形态(`arr[i].m()` 90 次 / `a.b.m()` 107 次)。**做之前先测上界**:把接收者判定临时放到最宽(任何接收者都算合约实例,保留 view 过滤与调用位闸门),得到「任何接收者形态工作所能带来的最大增量」。
+
+结果 **19 条**(Phase 28 实际 3 条)。逐条查证这 16 条增量:
+
+| 位置 | 实际内容 | 判定 |
+|---|---|---|
+| `UniswapV2Pair.sol:186` ×12 | `abi.encodePacked(` | 内置对象,非调用 |
+| `Uni.sol:368` / `:443` | `abi.encode(` | 同上 |
+| `NonfungiblePositionManager.sol:165` | `PoolAddress.PoolKey({...})` | 库限定结构体构造 |
+| `V404.sol:97` / `:126` | `key.currency0.isAddressZero()` / `delta.amount0()` | `using for` 库函数 |
+
+**16 条全部是误报,真实漏报为 0。** 接收者形态工作在本语料上的上界收益就是 0——原计划就此作废。
+
+### 转向:全规则分布测量
+| | |
+|---|---|
+| 单元 / 发现 | 42 / 201 |
+| 触发的规则 | 41 个 rule_id 中 **22** 个 |
+| 等级分布 | A 10 · B 5 · C 4 · **D 17** · **F 6** |
+
+高频项里 `FLOATING_PRAGMA`(28)/`OUTDATED_COMPILER`(23)/`INLINE_ASSEMBLY`(22) 都是 Info/Low 噪声。**`PROXY_UNPROTECTED_INITIALIZER` 17 条**引起注意——High 严重度,42 个合约报 17 条明显偏高。
+
+### 三类误报,逐一实测
+抽查 17 条的证据字符串,**16 条以 `;` 结尾**:
+
+```solidity
+function initialize(address, address) external;                        // 接口声明
+function initialize(PoolKey memory key, uint160 p) external returns (int24);
+```
+
+根因:`initializer_guarded` **从不在 `;` 处停止**。遇到接口声明时它扫过声明、进入文件后续内容,撞上下一个函数的 `{` 就判「无守卫」。
+
+修掉这一类后剩 3 类位置,继续查:
+
+| 剩余形态 | 实际情况 | 判定 |
+|---|---|---|
+| `UniswapV2Pair.sol:361` | `require(msg.sender == factory)` 守卫,源码注释写着 "sufficient check" | 误报 |
+| `PositionInfoLibrary.sol:91` | `internal pure` —— 不可外部调用、不写状态 | 误报 |
+| `PoolManager.sol:116` | `external noDelegateCall`,确无守卫 | **真发现** |
+
+### 本期判据(对齐 Phase 17 给 access-control 定的标准)
+未保护初始化器必须**可外部调用**、**能写状态**、**无任何形式守卫**:
+
+1. `initializer_has_body` —— `;` 与 `{` 谁先出现决定是声明还是实现(同一行两者都有时看**先后**,签名可跨行)
+2. `initializer_is_reachable` —— 必须 `external`/`public`,排除 `internal`/`private`/`view`/`pure`(按词切分,避免 `viewer` 这类子串误中)
+3. `initializer_guarded` 扩展 —— 除 OZ 的 `initializer`/`onlyInitializing` 修饰符外,函数体内的**调用者检查**同样算守卫;按花括号深度扫到函数结束为止
+
+**语料实测:17 → 1。**
+
+### 缺陷家族第七次复发 —— 这次是测试套件抓到的
+守卫扩展的初版我写的是「函数体内出现 `msg.sender` 即视为有守卫」。既有测试 `unprotected_initializer_multiline_and_guarded` 立刻失败,用例是:
+
+```solidity
+function initialize() public virtual { owner = msg.sender; }
+```
+
+这是**最典型的未保护初始化器**(谁都能调用并成为 owner),我却把它判成了「有守卫」——**把「出现」当成「语义角色」,与前六次同一根因**。
+
+修正为必须处于检查上下文(`require`/`assert`/`if`),与 Phase 17 的 `has_msg_sender_guard` 同一标准。**这是七次里第一次由测试套件而非对抗式审查发现**,说明既有回归测试确实在承担防线职责。
+
+### 净效果 / 不变量
+- 纯精度修复,**只减不增**:三条判据都是收紧。
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / 指纹不变。
+- 行级启发式规则,不依赖绑定图,`detect` 与 `detect_unit` 两条路径同样受益。
+
+### 已知取舍(诚实声明)
+- 调用者检查按行判定:`require(x > 0); owner = msg.sender;` 写在同一行会被误判为有守卫。标准格式下不成立。
+- 只认 `require`/`assert`/`if` 三种检查上下文;经修饰符间接守卫的仍靠 `initializer`/`onlyInitializing` 名字匹配。
+- `PoolManager.initialize` 这条真发现在 Uniswap V4 中是**设计如此**(任何人可初始化池子)。规则不区分「无守卫」与「无守卫但合理」。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。
