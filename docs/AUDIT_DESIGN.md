@@ -1223,6 +1223,86 @@ function initialize() public virtual { owner = msg.sender; }
 - 只认 `require`/`assert`/`if` 三种检查上下文;经修饰符间接守卫的仍靠 `initializer`/`onlyInitializing` 名字匹配。
 - `PoolManager.initialize` 这条真发现在 Uniswap V4 中是**设计如此**(任何人可初始化池子)。规则不区分「无守卫」与「无守卫但合理」。
 
+## Phase 30:编译期常量不是运行时风险 ✅
+
+### 沿用 Phase 29 的方法:抽样三个高频规则,逐条读源码
+| 规则 | 出现次数 | 主导形态 | 判定 |
+|---|---|---|---|
+| `WEAK_BLOCK_RANDOMNESS` | 13 | `uint32(block.timestamp % 2**32)` ×13 | **13/13 误报** |
+| `UNSAFE_DOWNCAST_TRUNCATION` | 138 | `uint112(-1)` / `uint160((1 << 14) - 1)` | 大量误报 |
+| `ACCESS_MISSING_GUARD_PRIVILEGED_FN` | 17 | `mint` / `burn` / `setOperator` | 见下,本期不做 |
+
+前两条**共享同一根因**:操作数是**编译期常量**,不是运行时值。
+
+- `block.timestamp % 2**32` 是 UniswapV2 TWAP 预言机的 **32 位截断**,`% 2**32` 是位掩码而非取随机数。
+- `uint112(-1)` 是 0.8 之前 `type(uint112).max` 的写法;`uint160((1 << 14) - 1)` 是常量掩码。既有的字面量豁免只认**裸数字节点**,`-1`(一元前缀)和 `(1<<14)-1`(算术表达式)都漏了过去。
+
+### 本期三条判据(第 2 条初版并不可证明,见审查记录)
+1. **`is_constant_expression`** —— 表达式子树内**不含任何标识符终结符**即为编译期常量。保守方向:任何名字(包括 `constant` 状态变量)都算运行时,绝不靠猜去抑制。
+2. **`cast_arg_bounded_by_modulus`** —— `x % 2**k` 可证明小于 2ᵏ,故放得下任何 ≥ k 位的无符号目标。**前提是取模必须是实参自身的顶层运算符**(初版漏掉了这个前提,见审查记录)。`uint8(x % 2**32)` 仍然报。
+3. **`is_width_truncation_modulus`** —— 取模数为 **2¹⁶ 及以上的 2 的幂**时是宽度截断而非范围选择。`% 2` 是抛硬币、`% 100` 是选点数,都仍算随机数。
+
+### 语料实测(出现次数口径)
+| 规则 | 前 | 后 |
+|---|---|---|
+| `WEAK_BLOCK_RANDOMNESS` | 13 | **0** |
+| `UNSAFE_DOWNCAST_TRUNCATION` | 138 | **107** |
+| 全语料发现总数 | 817 | 773 |
+
+**测量口径本身踩过一次坑**:`SecurityFinding.locations` 是数组,一个合约的同规则发现会聚合成一条。初次统计数的是**合约数**(20 → 20,看似无效),改成累加 `locations.len()` 才看到真实的 138 → 107。Phase 29 的 17 → 1 是合约数口径,那里恰好因为某合约的全部出现都被消除才同步下降。
+
+### 缺陷家族第八次复发(自查发现)
+`is_constant_expression` 初版直接 `spawn()` 后找标识符终结符。**当实参本身就是一个标识符时**,`go_to_next_*` 从该节点向前搜索、不含自身,于是返回「无标识符」= 常量,把 `uint96(total)` 这类真发现全部压掉——8 个既有测试立刻失败。
+
+这与 Phase 28 在 `user_type_kind` 上避开的是同一个陷阱,当时避开了,这次没有。修正为先单独判断节点自身是否为标识符终结符。
+
+### 未做:`ACCESS_MISSING_GUARD_PRIVILEGED_FN`
+17 条看上去也都是误报——`UniswapV2Pair.mint`(AMM 的 LP 铸造,设计上无需许可)、`ERC20Burnable.burn`(烧自己的币)、`ERC6909.setOperator`(设置自己的操作员)。但根因是 `is_privileged_name` 的**名字表语义**:同一个 `mint`,在代币合约里该有守卫,在 AMM pair 里不该有。
+
+真正的判据应是「是否只写调用者自己的状态」(`balanceOf[msg.sender]`、`isOperator[msg.sender][x]`),这需要一轮独立设计。Phase 25 已经在这条规则上栽过一次,不重蹈覆辙。
+
+### 净效果 / 不变量
+- 纯精度修复,**只减不增**:三条判据都是收紧。
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / 指纹不变。
+
+### 已知取舍(诚实声明)
+- `is_constant_expression` 按语法判定:`constant` 状态变量虽是编译期常量,但因是标识符而仍被视为运行时值(方向:仍报,不漏)。
+- `is_width_truncation_modulus`(随机数侧)仍按文本取右操作数。它读的是 `MultiplicativeExpression` 祖先自身的文本,`%` 至少处在乘法上下文内,审查未测出失败输入;但这与下方被修掉的那处是同一种气味,已知且未做结构化。
+- 2¹⁶ 这个阈值是**判断,不是证明**:低于它的 2 的幂(`% 2`、`% 256`)按选取范围处理。
+- `uint8(signature[64])`(索引 bytes 必然放得下 uint8)、SafeCast 库里「先转换后 `require` 校验」的惯用法仍报——两者都需要更强的推理。
+
+### 对抗式审查记录(Phase 30,3-lens workflow + 双证伪 agent,13 个 agent 全部完成)
+
+简报里我写明:**本期只做抑制,所以危险方向是漏报**,并要求假设存在第九次复发。两点都命中了。
+
+**确认的 ship-blocker —— 第九次复发,文本取代了运算符树**
+
+`cast_arg_bounded_by_modulus` 初版把整个实参 `squeeze` 成文本后 `rsplit_once('%')`。**它从不检查 `%` 是否为实参自身的顶层运算符**,于是任何文本恰好以 `... % 2**k` 结尾的表达式都被判为「小于 2ᵏ」。本地逐条复现(HEAD 报 → 本期不报):
+
+| 表达式 | 为什么不成立 |
+|---|---|
+| `uint32(a + b % 2**32)` | `a` 无界 |
+| `uint32(a % 2**32 + b % 2**32)` | 两个 32 位数之和溢出 32 位 |
+| `uint32(c ? a : b % 2**32)` | 三元的**另一个分支** |
+| `uint32(g(b % 2**32))` | `g` 返回 `z * 1e18` |
+| `uint32(arr[a] + b % 2**32)` | 数组元素无界 |
+| `uint32(a * (b % 2**32))` | 乘法放大 |
+
+`x % 2**k < 2ᵏ` 这个命题为真,但它约束的是**取模的结果**,而不是「文本里含有取模的任意表达式」。这正是该家族的定式:**用语法近似替代语义属性**。而且方向是漏报——静默删掉真发现,没有测试会察觉,除非有人专门写。
+
+**修复(结构化,CST 实测后再写)**:
+
+```
+b % 2**32      → 顶层 MultiplicativeExpression,Operator = T:Percent,RightOperand = 2**32
+a + b % 2**32  → 顶层 AdditiveExpression                    ← 要求顶层是 % 即全部挡掉
+```
+
+要求实参节点自身是 `MultiplicativeExpression` 且 `Operator` 为 `Percent`,再取 `RightOperand` 子树的文本判断。九个用例(六个漏报 + 目标形态 + 两个对照)全部正确,**语料 107 / 0 不变**——印证了审查方的判断:语料里 13 处 `% 2**k` 全是顶层形态,该缺陷在当前数据上零实现影响,是**潜伏**暴露。
+
+**顺带修正的过度声明**:设计文档原写「三条判据全部可证明,非启发式」。第 2 条在结构化之前**并不可证明**;第 3 条的 2¹⁶ 阈值本来就是判断而非证明。两处均已改写。
+
+> 状态:✅ Phase 30 完成(编译期常量与可证明取模边界不再触发截断/随机数规则)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。语料出现次数:randomness **13 → 0**、downcast **138 → 107**、全规则 817 → 773。全量 **693 测试** = 588 单元 + 105 集成,clippy 零告警(本机实测)。后续 Phase 31+:`ACCESS_MISSING_GUARD_PRIVILEGED_FN` 的 17 条(需「是否只写调用者自身状态」的判据);SafeCast「先转换后 require 校验」惯用法;`uint8(bytes[i])` 索引必然放得下。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。

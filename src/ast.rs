@@ -1385,7 +1385,8 @@ fn in_randomness_context(c: &Cursor) -> bool {
     for a in c.ancestors() {
         match a.kind {
             NonterminalKind::MultiplicativeExpression => {
-                if squeeze(&a.unparse()).contains('%') {
+                let text = squeeze(&a.unparse());
+                if text.contains('%') && !is_width_truncation_modulus(&text) {
                     return true;
                 }
             }
@@ -1399,6 +1400,27 @@ fn in_randomness_context(c: &Cursor) -> bool {
         }
     }
     false
+}
+
+/// Whether a modulus truncates to a machine width rather than selecting from a
+/// range. `uint32(block.timestamp % 2**32)` is UniswapV2's 32-bit oracle
+/// timestamp — a bit mask, not a dice roll — and accounted for all 13 of this
+/// rule's corpus findings. `% players.length` and `% 100` still select.
+///
+/// Only powers of two from 2^16 up count: `% 2` is a coin flip, not a width.
+fn is_width_truncation_modulus(expr: &str) -> bool {
+    let Some((_, rhs)) = expr.rsplit_once('%') else {
+        return false;
+    };
+    let rhs = rhs.trim_matches(|c: char| c == '(' || c == ')' || c.is_whitespace());
+    if let Some((base, exp)) = rhs.split_once("**") {
+        return base.trim() == "2" && exp.trim().parse::<u32>().is_ok_and(|n| n >= 16);
+    }
+    let literal = match rhs.strip_prefix("0x") {
+        Some(hex) => u128::from_str_radix(hex, 16).ok(),
+        None => rhs.parse::<u128>().ok(),
+    };
+    literal.is_some_and(|v| v >= 65_536 && v.is_power_of_two())
 }
 
 // ---------------------------------------------------------------------------
@@ -1776,6 +1798,13 @@ fn cast_arg_non_truncating(call: &Cursor, unsigned: bool, n: u16) -> bool {
     let Some(arg) = first_argument_variant(call) else {
         return false;
     };
+    // A compile-time constant expression truncates nothing at runtime.
+    // `uint112(-1)` is how pre-0.8 code spells `type(uint112).max` and
+    // `uint160((1 << 14) - 1)` is a constant mask; together they were 15 of this
+    // rule's 20 corpus findings. A bare literal is the degenerate case.
+    if is_constant_expression(&arg) || cast_arg_bounded_by_modulus(&arg, unsigned, n) {
+        return true;
+    }
     match arg.node().kind() {
         NodeKind::Nonterminal(
             NonterminalKind::DecimalNumberExpression | NonterminalKind::HexNumberExpression,
@@ -1793,6 +1822,53 @@ fn cast_arg_non_truncating(call: &Cursor, unsigned: bool, n: u16) -> bool {
         }
         _ => false,
     }
+}
+
+/// `x % 2**k` is provably below 2^k, so it fits any unsigned target of at least
+/// k bits — UniswapV2's `uint32(block.timestamp % 2**32)` is the canonical case
+/// and the largest remaining class after constant folding. A smaller target is
+/// still a truncation: `uint8(x % 2**32)` keeps firing.
+fn cast_arg_bounded_by_modulus(arg: &Cursor, unsigned: bool, n: u16) -> bool {
+    if !unsigned {
+        return false;
+    }
+    // The modulo has to be the argument's *own* top-level operator. Splitting the
+    // argument text on its last `%` proved nothing about the left operand:
+    // `uint32(a + b % 2**32)` and `uint32(g(b % 2**32))` both end in `% 2**32`,
+    // and neither value is below 2^32. Those parse as Additive and FunctionCall
+    // at the top, so asking the node its kind rejects them.
+    if !is_kind(arg, NonterminalKind::MultiplicativeExpression) {
+        return false;
+    }
+    let mut op = arg.spawn();
+    if !to_child(&mut op, EdgeLabel::Operator)
+        || op.node().kind() != NodeKind::Terminal(TerminalKind::Percent)
+    {
+        return false;
+    }
+    let mut rhs = arg.spawn();
+    if !to_child(&mut rhs, EdgeLabel::RightOperand) {
+        return false;
+    }
+    let text = squeeze(&rhs.node().unparse());
+    let Some((base, exp)) = text.split_once("**") else {
+        return false;
+    };
+    base == "2" && exp.parse::<u16>().is_ok_and(|k| k <= n)
+}
+
+/// Whether an expression is built only from literals and operators, with no
+/// identifier anywhere in it, so its value is fixed at compile time. Conservative
+/// by construction: any name — including a `constant` state variable — makes it
+/// runtime as far as this test is concerned, so nothing is suppressed on a guess.
+fn is_constant_expression(expr: &Cursor) -> bool {
+    // A bare identifier is the expression itself, and `go_to_next_*` searches
+    // forward from the node rather than including it, so it has to be tested here.
+    if expr.node().kind() == NodeKind::Terminal(TerminalKind::Identifier) {
+        return false;
+    }
+    let mut c = expr.spawn(); // bounded to this expression
+    !c.go_to_next_terminal_with_kind(TerminalKind::Identifier)
 }
 
 /// The variant node of a call's first positional argument (skips trivia at each
@@ -2923,6 +2999,97 @@ mod tests {
 
     const TRANSFER_SEND: &str = "HARDCODED_GAS_TRANSFER_SEND";
     const DOWNCAST: &str = "UNSAFE_DOWNCAST_TRUNCATION";
+
+    // ---- Phase 30: constant operands are not runtime hazards ----
+
+    #[test]
+    fn a_constant_expression_cast_is_not_a_truncation() {
+        // `uint112(-1)` is how pre-0.8 code spells `type(uint112).max`, and a
+        // constant mask folds at compile time. Together these were 15 of this
+        // rule's 20 corpus findings, 13 of them one line in UniswapV2Pair.
+        let max = "pragma solidity ^0.8.0;
+contract C { function f(uint b) public pure { require(b <= uint112(-1)); } }
+";
+        assert!(!has(max, DOWNCAST));
+        let mask = "pragma solidity ^0.8.0;
+contract C { uint160 constant M = uint160((1 << 14) - 1); }
+";
+        assert!(!has(mask, DOWNCAST));
+        // A name — even a `constant` one — is runtime as far as this test knows,
+        // so nothing is suppressed on a guess.
+        let var = "pragma solidity ^0.8.0;
+contract C { uint total; function f() public { uint96 x = uint96(total); x; } }
+";
+        assert!(has(var, DOWNCAST));
+    }
+
+    #[test]
+    fn the_modulo_must_be_the_arguments_own_operator() {
+        // `x % 2**k < 2^k` only bounds the value when the modulo is what produces
+        // it. Splitting the argument text on its last `%` proved nothing about the
+        // left operand, so every one of these silently lost a real truncation —
+        // found by review, none of them present in the corpus.
+        fn cast32(body: &str) -> String {
+            format!("pragma solidity ^0.8.0;
+contract C {{ uint[] arr;
+  function g(uint z) internal pure returns (uint) {{ return z * 1e18; }}
+  function f(uint a, uint b, bool c) public view returns (uint32) {{ {body} }}
+}}
+")
+        }
+        for body in [
+            "return uint32(a + b % 2**32);",          // `a` is unbounded
+            "return uint32(a % 2**32 + b % 2**32);",  // the sum overflows 32 bits
+            "return uint32(c ? a : b % 2**32);",      // the other branch
+            "return uint32(g(b % 2**32));",           // g multiplies by 1e18
+            "return uint32(arr[a] + b % 2**32);",
+            "return uint32(a * (b % 2**32));",
+        ] {
+            assert!(has(&cast32(body), DOWNCAST), "over-suppressed: {body}");
+        }
+        // The intended shape stays suppressed.
+        assert!(!has(&cast32("return uint32(b % 2**32);"), DOWNCAST));
+    }
+
+    #[test]
+    fn a_modulo_bounded_value_fits_its_cast() {
+        // `x % 2**32` is provably below 2^32.
+        let fits = "pragma solidity ^0.8.0;
+contract C { function f() public view returns (uint32) { return uint32(block.timestamp % 2**32); } }
+";
+        assert!(!has(fits, DOWNCAST));
+        // A smaller target still truncates.
+        let narrow = "pragma solidity ^0.8.0;
+contract C { function f() public view returns (uint8) { return uint8(block.timestamp % 2**32); } }
+";
+        assert!(has(narrow, DOWNCAST));
+    }
+
+    #[test]
+    fn a_width_truncation_modulus_is_not_randomness() {
+        // UniswapV2's 32-bit oracle timestamp: a bit mask, not a dice roll. All
+        // 13 corpus findings for this rule were this one line.
+        let trunc = "pragma solidity ^0.8.0;
+contract C { uint32 t; function f() public { t = uint32(block.timestamp % 2**32); } }
+";
+        assert!(!has(trunc, RANDOMNESS));
+        // Selecting from a range is still randomness, whether the bound is a name
+        // or a small literal.
+        let pick = "pragma solidity ^0.8.0;
+contract C { address[] p; address w; function f() public { w = p[block.timestamp % p.length]; } }
+";
+        assert!(has(pick, RANDOMNESS));
+        let small = "pragma solidity ^0.8.0;
+contract C { uint w; function f() public { w = block.timestamp % 100; } }
+";
+        assert!(has(small, RANDOMNESS));
+        // A coin flip is a small power of two, and still a dice roll.
+        let flip = "pragma solidity ^0.8.0;
+contract C { uint w; function f() public { w = block.timestamp % 2; } }
+";
+        assert!(has(flip, RANDOMNESS));
+    }
+
 
     fn count(content: &str, rule: &str) -> usize {
         detect(content).expect("parses").iter().filter(|h| h.rule_id == rule).count()
