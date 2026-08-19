@@ -806,6 +806,91 @@ fn callee_mutates(member: &Cursor, bg: &Rc<BindingGraph>) -> bool {
     }
 }
 
+/// Whether this member access is the *callee* of a call rather than a member
+/// read. `IThing(a).m.selector`, `.address`, and `abi.encodeCall(IThing(a).m, ..)`
+/// name a function without invoking it — anchoring a reentrancy finding on one
+/// points at a line where nothing external happens.
+///
+/// Measured tree shape: a callee hangs off `Operand -> Expression` whose own
+/// parent is a `FunctionCallExpression`. A member read differs at one of those
+/// two steps — `IThing(a).m.selector` puts `IThing(a).m` under a
+/// `MemberAccessExpression`, and an `encodeCall` argument arrives by an `Item`
+/// edge instead of `Operand`. Both steps are therefore checked.
+///
+/// Only the binding-graph branch consults this. The four text sinks
+/// (`.call`/`.delegatecall`/`.transfer`/`.send`) keep their Phase 16 behaviour,
+/// since call options (`addr.call{value: v}("")`) put another node in between.
+fn is_call_callee(member: &Cursor) -> bool {
+    let mut up = member.clone();
+    if !up.go_to_parent() || up.label() != EdgeLabel::Operand {
+        return false;
+    }
+    if !up.go_to_parent() {
+        return false;
+    }
+    matches!(
+        up.node().kind(),
+        NodeKind::Nonterminal(NonterminalKind::FunctionCallExpression)
+    )
+}
+
+/// Whether the receiver of a member access is a contract instance.
+///
+/// Two shapes reach one: a variable of contract type (`tok.transfer`), and an
+/// explicit cast (`IERC20(a).transfer`) — which is how most code reaches an
+/// arbitrary address, 271 occurrences across 23 of the 42 corpus units, none of
+/// them visible to `receiver_identifier`, which accepts only a bare identifier.
+///
+/// A cast is syntactically identical to a call: `IERC20(a)` and `pick(a)` parse
+/// to the same tree. So the callee is resolved through the binding graph and only
+/// a contract or interface *definition* counts — nothing here is decided by name.
+fn receiver_is_contract_instance(member: &Cursor, bg: &Rc<BindingGraph>) -> bool {
+    if let Some(r) = receiver_identifier(member) {
+        return matches!(resolve_decl_type(&r, bg), Some(ResolvedType::ContractLike));
+    }
+    cast_callee_identifier(member).is_some_and(|id| resolves_to_contract_definition(&id, bg))
+}
+
+/// The type a cast receiver names: `IERC20(a).m()` -> the `IERC20` identifier.
+/// `None` for every other receiver shape, including `payable(x)` (a keyword, not
+/// an identifier), `arr[i]`, and `a.b`.
+fn cast_callee_identifier(member: &Cursor) -> Option<Cursor> {
+    let mut c = member.clone();
+    if !to_child(&mut c, EdgeLabel::Operand) || !to_child(&mut c, EdgeLabel::Variant) {
+        return None;
+    }
+    if !matches!(
+        c.node().kind(),
+        NodeKind::Nonterminal(NonterminalKind::FunctionCallExpression)
+    ) {
+        return None;
+    }
+    if !to_child(&mut c, EdgeLabel::Operand) || !to_child(&mut c, EdgeLabel::Variant) {
+        return None;
+    }
+    (c.node().kind() == NodeKind::Terminal(TerminalKind::Identifier)).then_some(c)
+}
+
+/// Whether an identifier names a contract or interface *type*, as opposed to a
+/// function, a variable, or anything else that can appear in call position.
+fn resolves_to_contract_definition(ident: &Cursor, bg: &Rc<BindingGraph>) -> bool {
+    let Some(reference) = bg.reference_at(ident) else {
+        return false;
+    };
+    let Some(def) = reference.definitions().into_iter().next() else {
+        return false;
+    };
+    let BindingLocation::UserFile(loc) = def.definiens_location() else {
+        return false;
+    };
+    matches!(
+        loc.cursor().node().kind(),
+        NodeKind::Nonterminal(
+            NonterminalKind::ContractDefinition | NonterminalKind::InterfaceDefinition
+        )
+    )
+}
+
 /// Offset + 1-based line of the earliest external call in `func` — a low-level
 /// call by name, or a mutating method on a contract-typed receiver.
 fn earliest_external_call(func: &Cursor, bg: Option<&Rc<BindingGraph>>) -> Option<(usize, usize)> {
@@ -813,11 +898,8 @@ fn earliest_external_call(func: &Cursor, bg: Option<&Rc<BindingGraph>>) -> Optio
     let mut c = func.clone();
     while c.go_to_next_nonterminal_with_kind(NonterminalKind::MemberAccessExpression) {
         let text = squeeze(&c.node().unparse());
-        let contract_call = bg.is_some_and(|g| {
-            receiver_identifier(&c)
-                .is_some_and(|r| matches!(resolve_decl_type(&r, g), Some(ResolvedType::ContractLike)))
-                && callee_mutates(&c, g)
-        });
+        let contract_call = is_call_callee(&c)
+            && bg.is_some_and(|g| receiver_is_contract_instance(&c, g) && callee_mutates(&c, g));
         if REENTRANCY_SINKS.iter().any(|s| text.ends_with(s)) || contract_call {
             let off = c.text_offset().utf8;
             if best.is_none_or(|(b, _)| off < b) {
@@ -3621,6 +3703,87 @@ mod tests {
         assert!(!unit_has(sel, REENT));
         let konst = "pragma solidity ^0.8.0;\ninterface IERC20 { function transfer(address, uint) external returns (bool); }\nlibrary Cfg { IERC20 internal constant TOKEN = IERC20(address(0)); uint internal constant CAP = 7; }\ncontract C { uint public total;\n  function f(uint n) external { uint x = Cfg.CAP; total += n + x; }\n}\n";
         assert!(!unit_has(konst, REENT));
+        // The *cast* spelling of the same shape. Phase 27 pinned only the
+        // type-name spelling, which the definiens gate blocks; Phase 28's cast
+        // branch reached the member read by the other route and this test did
+        // not notice, because a test that pins one spelling does not pin the shape.
+        let cast_sel = "pragma solidity ^0.8.0;
+interface IRouter { function swap(address, uint) external returns (uint); }
+contract C { uint public total; bytes public payload;
+  function build(address r, uint n) external { payload = abi.encodeWithSelector(IRouter(r).swap.selector, r, n); total += n; }
+}
+";
+        assert!(!unit_has(cast_sel, REENT));
+    }
+
+    // ---- Phase 28: cast receivers (`IThing(addr).m()`) ----
+
+    /// `approve` and `reserves` are deliberately NOT in `REENTRANCY_SINKS`, so a
+    /// hit here can only come from the cast-receiver path.
+    const P28_IF: &str = "interface IPair { function approve(address,uint) external returns (bool); function reserves() external view returns (uint); }\n";
+
+    #[test]
+    fn a_cast_receiver_is_an_external_call() {
+        // `IPair(a).approve(...)` is how most code reaches an arbitrary contract.
+        // `receiver_identifier` only accepts a bare identifier, so before this the
+        // call was invisible and the state write after it went unreported.
+        let src = format!("pragma solidity ^0.8.0;\n{P28_IF}contract C {{ uint t;\n  function f(address a, uint n) external {{ IPair(a).approve(a, n); t += n; }}\n}}\n");
+        assert!(unit_has(&src, REENT));
+        assert!(!has(&src, REENT)); // needs the graph; no name spelling gives it away
+    }
+
+    #[test]
+    fn a_cast_receiver_view_call_is_not_a_sink() {
+        let src = format!("pragma solidity ^0.8.0;\n{P28_IF}contract C {{ uint t;\n  function f(address a, uint n) external {{ uint b = IPair(a).reserves(); t += n + b; }}\n}}\n");
+        assert!(!unit_has(&src, REENT));
+    }
+
+    #[test]
+    fn a_call_returning_a_contract_is_not_a_cast() {
+        // `pick(a)` and `IPair(a)` parse to the same tree; only the binding graph
+        // separates them. Resolving `pick` to a function must not count as a cast.
+        let src = format!("pragma solidity ^0.8.0;\n{P28_IF}contract C {{ uint t;\n  function pick(address a) internal pure returns (IPair) {{ return IPair(a); }}\n  function f(address a, uint n) external {{ pick(a).approve(a, n); t += n; }}\n}}\n");
+        assert!(!unit_has(&src, REENT));
+    }
+
+    #[test]
+    fn struct_and_enum_constructions_are_not_contract_casts() {
+        let st = "pragma solidity ^0.8.0;\ncontract C { struct P { uint a; } uint t;\n  function g(P memory q) internal pure returns (uint) { return q.a; }\n  function f(uint n) external { uint x = g(P({a: n})); t += n + x; }\n}\n";
+        assert!(!unit_has(st, REENT));
+        let en = "pragma solidity ^0.8.0;\ncontract C { enum S { A, B } uint t;\n  function g(S q) internal pure returns (uint) { return uint(q); }\n  function f(uint n) external { uint x = g(S(n % 2)); t += n + x; }\n}\n";
+        assert!(!unit_has(en, REENT));
+    }
+
+    #[test]
+    fn a_cast_receiver_member_read_is_not_a_call() {
+        // `.selector` / `.address` / an `encodeCall` argument name a function
+        // without invoking it. A queue or batcher that only builds calldata makes
+        // no interaction at all, so its bookkeeping write is not a CEI violation.
+        for body in [
+            "bytes4 s; function f(address a, uint n) external { s = IPair(a).approve.selector; t += n; }",
+            "address z; function f(address a, uint n) external { z = IPair(a).approve.address; t += n; }",
+            "bytes p; function f(address a, uint n) external { p = abi.encodeCall(IPair(a).approve, (a, n)); t += n; }",
+        ] {
+            let src = format!("pragma solidity ^0.8.0;\n{P28_IF}contract C {{ uint t; {body} }}\n");
+            assert!(!unit_has(&src, REENT), "member read fired: {body}");
+        }
+    }
+
+    #[test]
+    fn a_member_read_does_not_steal_the_anchor_from_a_real_call() {
+        // The read sits one line above the call. Without the call-position check
+        // the finding anchored on the read — a line where nothing external happens
+        // — displacing the call it was supposed to point at.
+        let src = format!("pragma solidity ^0.8.0;\n{P28_IF}contract C {{ uint t; bytes4 s;\n  function f(address a, uint n) external {{\n    s = IPair(a).approve.selector;\n    IPair(a).approve(a, n);\n    t += n;\n  }}\n}}\n");
+        let lines: Vec<usize> = detect_unit(&[("m.sol", src.as_str())])
+            .expect("unit")
+            .into_values()
+            .flatten()
+            .filter(|h| h.rule_id == REENT)
+            .map(|h| h.line)
+            .collect();
+        // Line 5 is the `.selector` read, line 6 the real call.
+        assert_eq!(lines, vec![6], "expected the anchor on the real call, not the read");
     }
 
     // ---- Phase 26: the _msgSender() caller indirection ----
@@ -3652,4 +3815,3 @@ mod tests {
         assert!(unit_has(src, ACCESS));
     }
 }
-

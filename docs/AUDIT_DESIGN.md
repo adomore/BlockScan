@@ -1063,6 +1063,93 @@ Phase 26 归档的 Phase 27 是「修饰符调用经绑定图解析到定义」�
 
 > 状态:✅ Phase 27 完成(重入面从 4 个文本后缀扩为「合约类型接收者上的非 view 方法调用」;view 过滤器与值声明闸门均为实测所必需)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **680 测试** = 575 单元 + 105 集成,clippy 零告警(本机实测)。语料 reentrancy 2 → 3。后续 Phase 28+:`resolve_decl_type` 的其余接收者形态(`IThing(addr).m()`、`payable(x).m()`);守卫按完整访问路径;同文件三元左值的既有不精确。
 
+## Phase 28:转换接收者 `IThing(addr).m()` ✅
+
+### 立项测量
+| 形态 | 单元数 | 次数 |
+|---|---|---|
+| **`IThing(x).m()` 类型转换接收者** | **23 / 42** | **271** |
+| `arr[i].m()` 索引接收者 | 24 / 42 | 90 |
+| `a.b.m()` 嵌套成员 | 7 / 42 | 107 |
+| `payable(x).m()` | 1 / 42 | 1 |
+| 三元左值(Phase 24 遗留) | 0 / 42 | **0** |
+
+`receiver_identifier` 只接受**裸标识符**,以上复杂接收者一律返回 `None` → Phase 27 的重入面看不见它们。转换接收者是调用任意合约的标准写法,故选它。
+
+### 关键设计点:转换与调用在语法上不可区分
+CST 实测:
+
+```
+IERC20(a).transfer  → Operand.Variant = FunctionCallExpression "IERC20(a)"
+                       └─ callee.Variant = Terminal(Identifier) "IERC20"
+pick(a).transfer    → Operand.Variant = FunctionCallExpression "pick(a)"
+                       └─ callee.Variant = Terminal(Identifier) "pick"    ← 树完全相同
+```
+
+**没有任何语法特征能区分二者**,只能靠绑定图把被调标识符解析到定义,且仅接受 `ContractDefinition` / `InterfaceDefinition`。这是刻意避免「按名字像不像类型来判断」——那将是该缺陷家族第六次复发。
+
+### 诚实的收益陈述(重要)
+**语料发现增量为 0**(仍 3 条)。唯一可测的改善是 `UNIv4.sol` 的锚点从 395 前移到 **394**——`IUniswapV2Factory(...).createPair(...)` 现被识别,发现终于指向**真正最早**的外部调用,与规则自述一致。
+
+**271 这个数字论证的是「该做哪个形态」,不是收益。** 把形态频次当成收益,正是 Phase 25 的范畴错误。本期收益是:一处锚点更准 + 关闭一类真实漏报(本语料恰好不含其孤立实例) + 零新增误报面。
+
+### 自查的对抗性探针(评审前先自己找)
+| 用例 | `detect_unit` | `detect` |
+|---|---|---|
+| `IPair(a).approve(...)` + 状态写 | 报 | 不报 ← 新增能力 |
+| `IPair(a).reserves()`(view) | 不报 | 不报 |
+| `pick(a).approve(...)`(函数返回接口) | 不报 | 不报 |
+| 结构体构造 / 枚举转换 | 不报 | — |
+
+首轮探针**自身有缺陷**:我用 `.transfer` 做真阳性用例,而它本就命中四个文本后缀之一,两条都没隔离出本期改动。改用 `approve`/`reserves` 后才成立——记此一笔,因为这正是「用错指标」的同类错误。
+
+### 净效果 / 不变量
+- `AST_RULES` 仍 8;检测器仍 36;rule_id / 评分 / 指纹**不变**。
+- 单调性同 Phase 27:加宽候选集合只会让锚点前移或不变,故只增不减。
+- 无绑定图时行为不变(转换接收者需要解析,`detect` 路径一律不认)。
+
+### 已知取舍(诚实声明)
+- 只认**转换**接收者。`arr[i].m()`(90 次)、`a.b.m()`(107 次)、`payable(x).m()`(1 次)仍不认——方向:漏报。
+- 函数返回的合约实例(`pick(a).m()`)不认:需要返回类型解析,本期不做。
+- 转换目标必须解析到 `ContractDefinition`/`InterfaceDefinition`;跨文件未解析的接口不认。
+- 调用位判据只覆盖绑定图分支。四个文本 sink 仍不检查调用位——`addr.call` 的成员读取(若有人这么写)仍会锚定,这是 Phase 16 起的既有行为,本期不动以维持精确降级。
+
+### 对抗式审查记录(Phase 28,3-lens workflow + 双证伪 agent,13 个 agent 全部完成)
+
+本期给审查的简报里**明写了「预设该缺陷家族会复发,请去找」**。它找到了,而且位置比我预判的更精确。
+
+**确认的问题 —— 成员读取被当成外部调用(第六次复发)**
+
+转换分支让**任何**接收者是转换的成员访问都成为锚点候选,而 `earliest_external_call` 从不检查该成员访问是否处于**调用位**。于是这些不产生任何调用的表达式成了锚点:
+
+```solidity
+s = IPair(a).approve.selector;                      // 编译期常量
+z = IPair(a).approve.address;
+p = abi.encodeCall(IPair(a).approve, (a, n));       // 只构造 calldata
+```
+
+**最难堪的一点**:这个修复我在 Phase 27 就写过(`is_call_callee`),实测「不必要」后撤销了。当时的判断没错——类型名拼写 `IRouter.swap.selector` 被 Phase 27 的 definiens 闸门挡住;但**转换拼写 `IRouter(r).swap.selector` 从另一条路绕过了它**。
+
+**而 Phase 27 的回归测试 `member_reads_that_invoke_nothing_are_not_calls` 至今仍通过**——因为它只钉住了类型名那一种拼写。教训:**钉住一种拼写的测试,并不钉住那个形态**。该测试现已补上转换拼写。
+
+**实证的锚点位移**:第 4 行 `.selector` 读取 + 第 5 行真实调用,修复前锚在第 4 行——正好把本期唯一宣称的收益(锚点指向最早的真实外部调用)**反转**成指向一个什么都没发生的行。
+
+**语料实况**:该形态在语料中出现 **8 次、分布于 4/42 个单元**(OZ `ERC721.sol`、Uniswap V4 `fetcher.sol` 等),但**当前不产生任何语料发现**——那些函数恰好在读取之后没有状态写入。审查方需要人为添加一次状态写入才能触发。所以这是**潜伏的**误报面,不是已发生的回归;严重度按「落地前必修」而非「今日已破」计。
+
+**修复**:要求成员访问处于调用位,判据由 CST 实测而来——
+
+| 位置 | 上一级 | 上两级 |
+|---|---|---|
+| 调用位 | `Operand -> Expression` | `Variant -> FunctionCallExpression` |
+| `.selector` 内层 | `Operand -> Expression` | `Variant -> MemberAccessExpression` |
+| `encodeCall` 实参 | `Item -> Expression` | — |
+
+两级都查。**只作用于绑定图分支**:四个文本 sink 保持 Phase 16 行为,因为 `addr.call{value: v}("")` 的调用选项会在中间插入节点(这也是 Phase 27 那次导航写错的原因)。
+
+**未被采纳的分歧**:审查给出的 ERC721 行号 443/442 比实际大 1(其复现脚本添加了一行声明);证伪 agent 独立复核为 442/441,并确认语料增量仍为 **0**、`UNIv4` 锚点仍为 **394**。
+
+> 状态:✅ Phase 28 完成(转换接收者 `IThing(addr).m()` 纳入重入面;调用位闸门为审查所必需)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。全量 **686 测试** = 581 单元 + 105 集成,clippy 零告警(本机实测)。**语料发现增量为 0**,唯一可测改善是 `UNIv4.sol` 锚点 395 → 394。后续 Phase 29+:`arr[i].m()`(90 次)/ `a.b.m()`(107 次)接收者;守卫按完整访问路径;函数返回的合约实例。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。
