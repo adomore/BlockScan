@@ -21,3 +21,9 @@
 
 # Scratch harnesses left behind by review subagents (never part of the suite)
 /tests/zz_*.rs
+
+# External audit package and the prompt that drives it. Inputs to the work, not
+# products of this repo — and `reports/` alone is ~4.8 MB of PDFs. The tarball
+# it arrives in is already covered by *.tar.gz above.
+/blockscan-evolution/
+/CLAUDE_CODE_PROMPT.md
