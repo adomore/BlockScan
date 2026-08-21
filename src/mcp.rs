@@ -538,11 +538,39 @@ fn arg_bool(args: &Value, key: &str) -> bool {
 }
 
 /// The corpus directory for a call: explicit `out` argument, else the server's `-o`.
-fn arg_out(ctx: &ServerCtx, args: &Value) -> std::path::PathBuf {
-    match arg_str(args, "out") {
-        Some(o) => std::path::PathBuf::from(o),
-        None => ctx.out.clone(),
+/// The corpus directory for this request, constrained to the server's own base.
+///
+/// The `address` argument beside this one is parsed as a real `Address` before
+/// any path is built, and says why: traversal. That guard is on the leaf of the
+/// path — this one is on the root. Without it a caller chooses where the server
+/// reads and writes, which is the whole directory tree the process can reach.
+///
+/// Containment is decided after canonicalisation, so `..` segments and symlinks
+/// resolve before the prefix test rather than after it. A path that cannot be
+/// resolved at all is refused rather than guessed at.
+fn arg_out(ctx: &ServerCtx, args: &Value) -> error::Result<std::path::PathBuf> {
+    let Some(requested) = arg_str(args, "out") else {
+        return Ok(ctx.out.clone());
+    };
+    let base = ctx.out.canonicalize().unwrap_or_else(|_| ctx.out.clone());
+    let want = std::path::PathBuf::from(requested);
+    let resolved = want.canonicalize().map_err(|e| {
+        error::AppError::Config(format!("out: cannot resolve {}: {e}", want.display()))
+    })?;
+    if !resolved.starts_with(&base) {
+        return Err(error::AppError::Config(format!(
+            "out: {} is outside the server base {}",
+            resolved.display(),
+            base.display()
+        )));
     }
+    Ok(resolved)
+}
+
+/// [`arg_out`] mapped into the tool-result channel, so a refusal reaches the
+/// caller as a JSON-RPC error instead of a panic or a silent fallback.
+fn arg_out_or_err(ctx: &ServerCtx, args: &Value) -> Result<std::path::PathBuf, ToolOutcome> {
+    arg_out(ctx, args).map_err(|e| ToolOutcome::BadArgs(e.to_string()))
 }
 
 fn arg_min_risk(args: &Value) -> u8 {
@@ -605,8 +633,12 @@ fn tool_audit_source(args: &Value) -> ToolOutcome {
 }
 
 fn tool_audit_corpus(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
+    let out = match arg_out_or_err(ctx, args) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     let contracts = crate::audit_corpus(
-        &arg_out(ctx, args),
+        &out,
         arg_min_risk(args),
         arg_bool(args, "only_vulnerable"),
         arg_bool(args, "by_risk"),
@@ -620,7 +652,10 @@ fn tool_audit_corpus(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
 }
 
 fn tool_get_contract(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
-    let out = arg_out(ctx, args);
+    let out = match arg_out_or_err(ctx, args) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     let Some(raw) = arg_str(args, "address") else {
         return ToolOutcome::BadArgs("get_contract: missing 'address'".into());
     };
@@ -644,7 +679,11 @@ fn tool_get_contract(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
 fn tool_list_contracts(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
     let min_risk = arg_min_risk(args);
     let only_vulnerable = arg_bool(args, "only_vulnerable");
-    let contracts: Vec<Value> = storage::load_all_metadata(&arg_out(ctx, args))
+    let out = match arg_out_or_err(ctx, args) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    let contracts: Vec<Value> = storage::load_all_metadata(&out)
         .into_iter()
         .filter(|d| {
             // Filter on the saved audit (no re-audit): no audit can't meet min_risk.
@@ -671,8 +710,12 @@ fn tool_list_contracts(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
 }
 
 fn tool_export_sarif(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
+    let out = match arg_out_or_err(ctx, args) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
     let contracts = crate::audit_corpus(
-        &arg_out(ctx, args),
+        &out,
         arg_min_risk(args),
         arg_bool(args, "only_vulnerable"),
         false,
@@ -682,7 +725,11 @@ fn tool_export_sarif(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
 }
 
 fn tool_cluster_corpus(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
-    let clusters = analysis::cluster_by_code(&storage::load_all_metadata(&arg_out(ctx, args)));
+    let out = match arg_out_or_err(ctx, args) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+    let clusters = analysis::cluster_by_code(&storage::load_all_metadata(&out));
     ToolOutcome::Ok(json!({ "clusters": clusters }))
 }
 
@@ -691,8 +738,14 @@ fn tool_cluster_corpus(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
 /// Build a Json-format scan [`Config`] from inline network args (shared by the
 /// scan tools). `format = Json` so `process_addresses` materializes `contracts`
 /// instead of streaming to stdout (which is the MCP channel).
-fn build_scan_config(ctx: &ServerCtx, args: &Value, rpc_url: &str, etherscan_key: &str) -> Config {
-    Config {
+fn build_scan_config(
+    ctx: &ServerCtx,
+    args: &Value,
+    rpc_url: &str,
+    etherscan_key: &str,
+) -> error::Result<Config> {
+    let out_dir = arg_out(ctx, args)?;
+    Ok(Config {
         rpc_url: rpc_url.to_string(),
         etherscan_key: etherscan_key.to_string(),
         etherscan_base: arg_str(args, "etherscan_base")
@@ -701,7 +754,7 @@ fn build_scan_config(ctx: &ServerCtx, args: &Value, rpc_url: &str, etherscan_key
         blockscout_base: String::new(),
         blockscout_rate: 4,
         chain_id: args.get("chain_id").and_then(Value::as_u64).unwrap_or(1),
-        out_dir: arg_out(ctx, args),
+        out_dir,
         concurrency: 5,
         rate: 5,
         retries: 5,
@@ -719,7 +772,7 @@ fn build_scan_config(ctx: &ServerCtx, args: &Value, rpc_url: &str, etherscan_key
         min_risk: arg_min_risk(args),
         only_vulnerable: arg_bool(args, "only_vulnerable"),
         suppressions: Suppressions::default(),
-    }
+    })
 }
 
 /// Parse a bounded `from`/`to` block range (≤ [`MAX_RANGE`]). `Err` is a BadArgs message.
@@ -757,7 +810,10 @@ async fn tool_scan_addresses(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
     if addrs.is_empty() {
         return ToolOutcome::BadArgs("scan_addresses: no valid addresses".into());
     }
-    let cfg = build_scan_config(ctx, args, rpc_url, etherscan_key);
+    let cfg = match build_scan_config(ctx, args, rpc_url, etherscan_key) {
+        Ok(c) => c,
+        Err(e) => return ToolOutcome::BadArgs(e.to_string()),
+    };
     if let Err(e) = cfg.validate() {
         return ToolOutcome::ToolError(e.to_string());
     }
@@ -780,7 +836,10 @@ async fn tool_scan_block_range(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
         Ok(r) => r,
         Err(e) => return ToolOutcome::BadArgs(format!("scan_block_range: {e}")),
     };
-    let cfg = build_scan_config(ctx, args, rpc_url, etherscan_key);
+    let cfg = match build_scan_config(ctx, args, rpc_url, etherscan_key) {
+        Ok(c) => c,
+        Err(e) => return ToolOutcome::BadArgs(e.to_string()),
+    };
     if let Err(e) = cfg.validate() {
         return ToolOutcome::ToolError(e.to_string());
     }
@@ -921,6 +980,55 @@ mod tests {
         r.expect("request gets a response")
     }
 
+    /// Like [`call`], but with the server's own base set to `base`. Corpus tools
+    /// take an `out` argument, and since T-01 that argument must resolve inside
+    /// the server base — so a test driving one has to say what the base is
+    /// rather than relying on the request to choose it.
+    async fn call_at(base: &std::path::Path, tool: &str, args: Value) -> Value {
+        let ctx = ServerCtx::new(base.to_path_buf());
+        let r = handle(&ctx, &req("tools/call", json!(1), json!({ "name": tool, "arguments": args }))).await;
+        r.expect("request gets a response")
+    }
+
+    // ---- T-01: the corpus directory is the server's, not the caller's ----
+
+    #[tokio::test]
+    async fn out_argument_outside_the_server_base_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let r = call_at(base.path(), "list_contracts", json!({ "out": escape.path() })).await;
+        assert!(r.get("error").is_some(), "a sibling directory must be refused: {r}");
+    }
+
+    #[tokio::test]
+    async fn out_argument_with_parent_traversal_is_refused() {
+        let base = tempfile::tempdir().unwrap();
+        let escape = base.path().join("..").join("..");
+        let r = call_at(base.path(), "list_contracts", json!({ "out": escape })).await;
+        assert!(r.get("error").is_some(), "parent traversal must be refused: {r}");
+    }
+
+    #[tokio::test]
+    async fn an_in_base_out_argument_and_an_absent_one_both_work() {
+        let base = tempfile::tempdir().unwrap();
+        let inner = base.path().join("chain-1");
+        std::fs::create_dir_all(&inner).unwrap();
+        // A real subdirectory of the base resolves and is accepted.
+        let r = call_at(base.path(), "list_contracts", json!({ "out": inner })).await;
+        assert!(r.get("error").is_none(), "an in-base subdirectory must work: {r}");
+        // Omitting the argument falls back to the server's own directory.
+        let r = call_at(base.path(), "list_contracts", json!({})).await;
+        assert!(r.get("error").is_none(), "the default path must work: {r}");
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_out_argument_is_refused_rather_than_guessed() {
+        let base = tempfile::tempdir().unwrap();
+        let missing = base.path().join("does-not-exist");
+        let r = call_at(base.path(), "list_contracts", json!({ "out": missing })).await;
+        assert!(r.get("error").is_some(), "an unresolvable path must be refused: {r}");
+    }
+
     #[tokio::test]
     async fn initialize_echoes_protocol_version_and_advertises_tools() {
         let r = handle(&ctx(), &req("initialize", json!(1), json!({ "protocolVersion": "2099-01-01" })))
@@ -1028,24 +1136,24 @@ mod tests {
         let tmp = save_vuln_corpus();
         let out = tmp.path().to_str().unwrap();
 
-        let r = call("audit_corpus", json!({ "out": out })).await;
+        let r = call_at(tmp.path(),"audit_corpus", json!({ "out": out })).await;
         assert_eq!(r["result"]["structuredContent"]["audited"], 1);
         assert!(r["result"]["structuredContent"]["contracts"][0]["audit"]["risk_score"].as_u64().unwrap() > 0);
 
-        let r = call("get_contract", json!({ "out": out, "address": "0x00000000000000000000000000000000000000aa", "include_source": true })).await;
+        let r = call_at(tmp.path(),"get_contract", json!({ "out": out, "address": "0x00000000000000000000000000000000000000aa", "include_source": true })).await;
         assert_eq!(r["result"]["structuredContent"]["contract"]["is_verified"], true);
         assert_eq!(r["result"]["structuredContent"]["sources"][0]["path"], "C.sol");
 
-        let r = call("get_contract", json!({ "out": out, "address": "0x00000000000000000000000000000000000000ff" })).await;
+        let r = call_at(tmp.path(),"get_contract", json!({ "out": out, "address": "0x00000000000000000000000000000000000000ff" })).await;
         assert_eq!(r["result"]["isError"], true); // not found
 
-        let r = call("list_contracts", json!({ "out": out })).await;
+        let r = call_at(tmp.path(),"list_contracts", json!({ "out": out })).await;
         assert_eq!(r["result"]["structuredContent"]["count"], 1);
 
-        let r = call("export_sarif", json!({ "out": out })).await;
+        let r = call_at(tmp.path(),"export_sarif", json!({ "out": out })).await;
         assert_eq!(r["result"]["structuredContent"]["version"], "2.1.0");
 
-        let r = call("cluster_corpus", json!({ "out": out })).await;
+        let r = call_at(tmp.path(),"cluster_corpus", json!({ "out": out })).await;
         assert!(r["result"]["structuredContent"]["clusters"].is_array());
     }
 
@@ -1114,11 +1222,11 @@ mod tests {
         let out_s = out.to_str().unwrap();
 
         // No filter -> both.
-        assert_eq!(call("list_contracts", json!({ "out": out_s })).await["result"]["structuredContent"]["count"], 2);
+        assert_eq!(call_at(out,"list_contracts", json!({ "out": out_s })).await["result"]["structuredContent"]["count"], 2);
         // min_risk drops the low-risk one.
-        assert_eq!(call("list_contracts", json!({ "out": out_s, "min_risk": 50 })).await["result"]["structuredContent"]["count"], 1);
+        assert_eq!(call_at(out,"list_contracts", json!({ "out": out_s, "min_risk": 50 })).await["result"]["structuredContent"]["count"], 1);
         // only_vulnerable drops the Low-only one.
-        assert_eq!(call("list_contracts", json!({ "out": out_s, "only_vulnerable": true })).await["result"]["structuredContent"]["count"], 1);
+        assert_eq!(call_at(out,"list_contracts", json!({ "out": out_s, "only_vulnerable": true })).await["result"]["structuredContent"]["count"], 1);
     }
 
     #[tokio::test]
