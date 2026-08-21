@@ -1479,7 +1479,15 @@ async fn binary_mcp_http_serves_over_loopback() {
     let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     let tmp = tempfile::tempdir().unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_blockscan"))
-        .args(["mcp", "--http", &format!("127.0.0.1:{port}"), "-o", tmp.path().to_str().unwrap()])
+        .args([
+            "mcp",
+            "--http",
+            &format!("127.0.0.1:{port}"),
+            "--http-token",
+            "bin-token",
+            "-o",
+            tmp.path().to_str().unwrap(),
+        ])
         .env_remove("ETHERSCAN_API_KEY")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1499,7 +1507,7 @@ async fn binary_mcp_http_serves_over_loopback() {
         let mut stream = stream.ok_or("server never bound")?;
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
         let req = format!(
-            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer bin-token\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(), body
         );
         stream.write_all(req.as_bytes()).await.map_err(|e| e.to_string())?;
@@ -1535,7 +1543,9 @@ async fn serve_http_in_process_dispatches_and_covers_accept_loop() {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().to_path_buf();
     let handle = tokio::spawn(async move {
-        let _ = blockscan::mcp::serve_http_on(listener, out, None).await;
+        // Since T-02 the HTTP surface always has a credential; give it a known
+        // one rather than letting it mint one this test cannot read off stderr.
+        let _ = blockscan::mcp::serve_http_on(listener, out, Some("it-token".to_string())).await;
     });
     let addr = format!("127.0.0.1:{port}");
     // The listener is already bound+listening, so connect should succeed on the
@@ -1551,7 +1561,7 @@ async fn serve_http_in_process_dispatches_and_covers_accept_loop() {
     let mut stream = stream.expect("in-process server should accept");
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
     let req = format!(
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer it-token\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(), body
     );
     stream.write_all(req.as_bytes()).await.unwrap();
@@ -1565,7 +1575,7 @@ async fn serve_http_in_process_dispatches_and_covers_accept_loop() {
     let mut s2 = tokio::net::TcpStream::connect(&addr).await.unwrap();
     let big = 2 * 1024 * 1024; // > MAX_HTTP_BODY (1 MiB)
     let head = format!(
-        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Length: {big}\r\nConnection: close\r\n\r\n"
+        "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer it-token\r\nContent-Length: {big}\r\nConnection: close\r\n\r\n"
     );
     s2.write_all(head.as_bytes()).await.unwrap();
     let _ = s2.write_all(&vec![b'x'; big]).await; // server may close early -> ignore write error

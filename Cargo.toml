@@ -29,6 +29,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 indicatif = "0.17"
 futures = "0.3"
 slang_solidity = "1.3.6"
+# OS CSPRNG only — used to mint the MCP bearer credential when HTTP mode is
+# started without one. Already in the tree transitively; named here because a
+# credential must not come from a non-cryptographic source.
+getrandom = "0.2"
 
 [dev-dependencies]
 wiremock = "0.6"

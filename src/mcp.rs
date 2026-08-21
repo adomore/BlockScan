@@ -113,6 +113,24 @@ pub async fn serve_http_on(
     use hyper_util::rt::TokioIo;
 
     let socket = listener.local_addr()?;
+    // T-02: this surface never runs unauthenticated. Loopback binding, exact
+    // origin matching and the body cap all defend against another *host*; the
+    // credential is the only one that defends against another *process on this
+    // one*, and it used to be the single control that was off by default. A
+    // caller that supplied no token gets one minted and printed once rather
+    // than the check being skipped.
+    let token = match token {
+        Some(t) => t,
+        None => {
+            let t = mint_token()?;
+            eprintln!(
+                "blockscan MCP: no --http-token supplied; generated one for this run:
+  {t}
+                 pass it as `Authorization: Bearer <token>`. Set --http-token (or                  BLOCKSCAN_MCP_TOKEN) to choose your own."
+            );
+            t
+        }
+    };
     tracing::info!("blockscan MCP server: HTTP on http://{socket}/mcp (loopback only; Ctrl-C to stop)");
     let ctx = std::sync::Arc::new(ServerCtx::new(out));
     let token = std::sync::Arc::new(token);
@@ -136,7 +154,7 @@ pub async fn serve_http_on(
                         let ctx = ctx.clone();
                         let token = token.clone();
                         async move {
-                            let resp = http_handle_conn(&ctx, token.as_deref(), req).await;
+                            let resp = http_handle_conn(&ctx, &token, req).await;
                             Ok::<_, std::convert::Infallible>(resp)
                         }
                     });
@@ -178,7 +196,7 @@ fn parse_loopback_addr(addr: &str) -> error::Result<std::net::SocketAddr> {
 /// Read the request body (bounded) then dispatch via the pure [`http_handle`].
 async fn http_handle_conn(
     ctx: &ServerCtx,
-    token: Option<&str>,
+    token: &str,
     req: hyper::Request<hyper::body::Incoming>,
 ) -> hyper::Response<http_body_util::Full<bytes::Bytes>> {
     use http_body_util::{BodyExt, Limited};
@@ -193,10 +211,26 @@ async fn http_handle_conn(
 }
 
 /// Pure HTTP request handler (no socket / no spawn) — directly testable in memory.
+/// A 256-bit bearer credential from the OS CSPRNG, hex-encoded.
+///
+/// `getrandom` is named as a direct dependency for exactly this: a credential
+/// must not come from a clock, a pid or a hash of either, and every other source
+/// reachable here is one of those.
+fn mint_token() -> error::Result<String> {
+    let mut raw = [0u8; 32];
+    getrandom::getrandom(&mut raw)
+        .map_err(|e| error::AppError::Config(format!("cannot generate an MCP credential: {e}")))?;
+    Ok(raw.iter().fold(String::with_capacity(64), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    }))
+}
+
 /// Maps an already-read request to a response per the Streamable HTTP contract.
 async fn http_handle(
     ctx: &ServerCtx,
-    token: Option<&str>,
+    token: &str,
     method: &hyper::Method,
     path: &str,
     headers: &hyper::HeaderMap,
@@ -209,15 +243,13 @@ async fn http_handle(
         // GET/DELETE/etc: a tools-only server has no server-initiated stream.
         return text_response(405, "method not allowed");
     }
-    if let Some(expected) = token {
-        let expected_header = format!("Bearer {expected}");
-        let ok = headers
-            .get(hyper::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|h| ct_eq(h.as_bytes(), expected_header.as_bytes()));
-        if !ok {
-            return text_response(401, "unauthorized");
-        }
+    let expected_header = format!("Bearer {token}");
+    let authorized = headers
+        .get(hyper::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|h| ct_eq(h.as_bytes(), expected_header.as_bytes()));
+    if !authorized {
+        return text_response(401, "unauthorized");
     }
     if !origin_allowed(headers) {
         return text_response(403, "forbidden origin (loopback only)");
@@ -1369,7 +1401,13 @@ mod tests {
         h
     }
 
-    async fn http(token: Option<&str>, method: hyper::Method, path: &str, headers: hyper::HeaderMap, body: &[u8]) -> (u16, Vec<u8>) {
+    /// The credential these tests drive the server with. Since T-02 the HTTP
+    /// surface always has one, so a test about method, path, origin or body size
+    /// has to present it — that is setup, and the assertions are unchanged.
+    const TOK: &str = "t0ken";
+    const BEARER: &str = "Bearer t0ken";
+
+    async fn http(token: &str, method: hyper::Method, path: &str, headers: hyper::HeaderMap, body: &[u8]) -> (u16, Vec<u8>) {
         use http_body_util::BodyExt;
         let resp = http_handle(&ctx(), token, &method, path, &headers, body).await;
         let status = resp.status().as_u16();
@@ -1380,13 +1418,13 @@ mod tests {
     #[tokio::test]
     async fn http_post_request_and_notification() {
         let init = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
-        let (st, body) = http(None, hyper::Method::POST, "/mcp", hdr(Some("http://localhost"), None), init).await;
+        let (st, body) = http(TOK, hyper::Method::POST, "/mcp", hdr(Some("http://localhost"), Some(BEARER)), init).await;
         assert_eq!(st, 200);
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["result"]["serverInfo"]["name"], "blockscan");
         // Notification (no id) -> 202 empty body.
         let note = br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
-        let (st, body) = http(None, hyper::Method::POST, "/mcp", hdr(None, None), note).await;
+        let (st, body) = http(TOK, hyper::Method::POST, "/mcp", hdr(None, Some(BEARER)), note).await;
         assert_eq!(st, 202);
         assert!(body.is_empty());
     }
@@ -1395,13 +1433,13 @@ mod tests {
     async fn http_tools_call_matches_stdio_and_bad_json() {
         // Same dispatch as stdio: an offline tool returns its result over HTTP.
         let call = br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"audit_source","arguments":{"sources":[{"path":"C.sol","content":"contract C { function f() public { require(tx.origin == owner); } }"}]}}}"#;
-        let (st, body) = http(None, hyper::Method::POST, "/mcp", hdr(None, None), call).await;
+        let (st, body) = http(TOK, hyper::Method::POST, "/mcp", hdr(None, Some(BEARER)), call).await;
         assert_eq!(st, 200);
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["result"]["isError"], false);
         assert!(v["result"]["structuredContent"]["risk_score"].as_u64().unwrap() > 0);
         // Bad JSON -> 200 + JSON-RPC parse error (NOT an HTTP 4xx).
-        let (st, body) = http(None, hyper::Method::POST, "/mcp", hdr(None, None), b"{not json").await;
+        let (st, body) = http(TOK, hyper::Method::POST, "/mcp", hdr(None, Some(BEARER)), b"{not json").await;
         assert_eq!(st, 200);
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"]["code"], PARSE_ERROR);
@@ -1409,29 +1447,65 @@ mod tests {
 
     #[tokio::test]
     async fn http_method_path_origin_size_auth_guards() {
-        let ok = hdr(Some("http://localhost"), None);
-        assert_eq!(http(None, hyper::Method::GET, "/mcp", ok.clone(), b"").await.0, 405);
-        assert_eq!(http(None, hyper::Method::POST, "/nope", ok.clone(), b"{}").await.0, 404);
-        assert_eq!(http(None, hyper::Method::POST, "/mcp", hdr(Some("http://evil.example"), None), b"{}").await.0, 403);
+        let ok = hdr(Some("http://localhost"), Some(BEARER));
+        assert_eq!(http(TOK, hyper::Method::GET, "/mcp", ok.clone(), b"").await.0, 405);
+        assert_eq!(http(TOK, hyper::Method::POST, "/nope", ok.clone(), b"{}").await.0, 404);
+        assert_eq!(http(TOK, hyper::Method::POST, "/mcp", hdr(Some("http://evil.example"), Some(BEARER)), b"{}").await.0, 403);
         // Regression (review MED): host-suffix must NOT pass the loopback origin check.
         let ping = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
         // `null` (opaque origin) is rejected — a legitimate local browser sends a
         // real loopback Origin; allowing `null` would weaken the rebinding guard.
         for bad in ["http://localhost.evil.com", "http://127.0.0.1.evil.com", "http://127.0.0.1@evil.com", "ftp://localhost", "null"] {
-            assert_eq!(http(None, hyper::Method::POST, "/mcp", hdr(Some(bad), None), ping).await.0, 403, "must reject {bad}");
+            assert_eq!(http(TOK, hyper::Method::POST, "/mcp", hdr(Some(bad), Some(BEARER)), ping).await.0, 403, "must reject {bad}");
         }
         // Genuine loopback origins (incl. IPv6 + port + https) are allowed.
         for good in ["http://localhost", "http://127.0.0.1:8765", "https://localhost", "http://[::1]:9000"] {
-            assert_eq!(http(None, hyper::Method::POST, "/mcp", hdr(Some(good), None), ping).await.0, 200, "must allow {good}");
+            assert_eq!(http(TOK, hyper::Method::POST, "/mcp", hdr(Some(good), Some(BEARER)), ping).await.0, 200, "must allow {good}");
         }
         let big = vec![b'x'; MAX_HTTP_BODY + 1];
-        assert_eq!(http(None, hyper::Method::POST, "/mcp", ok.clone(), &big).await.0, 413);
+        assert_eq!(http(TOK, hyper::Method::POST, "/mcp", ok.clone(), &big).await.0, 413);
         // Token: missing/wrong -> 401; correct -> dispatched.
-        assert_eq!(http(Some("secret"), hyper::Method::POST, "/mcp", ok.clone(), b"{}").await.0, 401);
+        assert_eq!(http("secret", hyper::Method::POST, "/mcp", ok.clone(), b"{}").await.0, 401);
         let ping = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-        assert_eq!(http(Some("secret"), hyper::Method::POST, "/mcp", hdr(Some("http://localhost"), Some("Bearer secret")), ping).await.0, 200);
+        assert_eq!(http("secret", hyper::Method::POST, "/mcp", hdr(Some("http://localhost"), Some("Bearer secret")), ping).await.0, 200);
         // No-Origin client is allowed (typical non-browser MCP client).
-        assert_eq!(http(None, hyper::Method::POST, "/mcp", hdr(None, None), ping).await.0, 200);
+        assert_eq!(http(TOK, hyper::Method::POST, "/mcp", hdr(None, Some(BEARER)), ping).await.0, 200);
+    }
+
+    // ---- T-02: the HTTP surface never runs unauthenticated ----
+
+    #[test]
+    fn minted_credentials_are_random_and_full_width() {
+        let a = mint_token().expect("OS CSPRNG");
+        let b = mint_token().expect("OS CSPRNG");
+        assert_eq!(a.len(), 64, "256 bits, hex-encoded");
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b, "two mints must not collide");
+    }
+
+    #[tokio::test]
+    async fn a_minted_credential_is_still_required() {
+        // The server that generates its own token must enforce it exactly as one
+        // given a token does — generating it is not a way of turning the check off.
+        let minted = mint_token().unwrap();
+        let ping = br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let none = hdr(Some("http://localhost"), None);
+        assert_eq!(http(&minted, hyper::Method::POST, "/mcp", none, ping).await.0, 401);
+        let wrong = hdr(Some("http://localhost"), Some("Bearer not-it"));
+        assert_eq!(http(&minted, hyper::Method::POST, "/mcp", wrong, ping).await.0, 401);
+        let right = hdr(Some("http://localhost"), Some(&format!("Bearer {minted}")));
+        assert_eq!(http(&minted, hyper::Method::POST, "/mcp", right, ping).await.0, 200);
+    }
+
+    #[tokio::test]
+    async fn stdio_does_not_gain_a_credential_requirement() {
+        // stdio has no network surface, so a credential there would cost usability
+        // and buy nothing.
+        let tmp = tempfile::tempdir().unwrap();
+        let c = ServerCtx::new(tmp.path().to_path_buf());
+        let r = handle(&c, &req("tools/list", json!(1), json!({}))).await;
+        let r = r.expect("tools/list answers on stdio with no credential");
+        assert!(r.get("error").is_none(), "stdio must stay credential-free: {r}");
     }
 
     #[test]
