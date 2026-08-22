@@ -47,7 +47,9 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
            │  rpc.get_code   @pinned block (空 → NotAContract)
            │  rpc.get_balance @pinned block
            │  etherscan.get_source_code  → SourceCodeResult
-           │  etherscan.get_contract_creation (best-effort,吞错)
+           │  etherscan.get_contract_creation
+           │    Ok(Some)=有记录 / Ok(None)=确无记录 / Err=请求未成功（三态区分）
+           │    失败不致命：写入 details.incomplete=["creation"]，RunStats.degraded += 1
            ├ BUILD
            │  build_details() → BuiltContract:
            │    storage::parse_sources()  拆 SourceCode 为 Vec<SourceFile>
@@ -180,7 +182,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | `src/chains.rs` | 静态链注册表:chain id → Blockscout v2 base + 短链名(硬编码 1/10/8453/42161/137) | `blockscout_base(u64) -> Option<&'static str>`, `chain_name(u64) -> String` |
 | **网络客户端** | | |
 | `src/rpc.rs` | alloy RootProvider/HTTP 的薄异步封装:链状态、创建发现、代理解析、分块并发事件日志扫描 | `RpcClient`(block_number/block_hash/pinned_at/pinned_block/contract_creations_in_block/trace_creations_in_block/get_code/get_balance/resolve_storage_proxy/logs_addresses/fetch_logs), `ProxyInfo`, `LogHit{block,address,topics,data,tx_hash,log_index}`, `slot_word_to_address`, `parse_trace_creations` |
-| `src/etherscan.rs` | Etherscan V2 客户端:取已验证源码 + 编译器/代理元数据 + 创建信息,带限流与限流重试 | `EtherscanClient`(get_source_code/get_contract_creation), `SourceCodeResult`, `CreationResult`, `is_rate_limited` |
+| `src/etherscan.rs` | Etherscan V2 客户端:取已验证源码 + 编译器/代理元数据 + 创建信息,带限流与限流重试 | `EtherscanClient`(get_source_code/get_contract_creation), `SourceCodeResult`, `CreationResult`, `is_rate_limited`, `means_absent`（仅枚举“确无记录”一侧，其余 status!=1 一律为失败） |
 | `src/sourcify.rs` | Sourcify v2 源码回退(Etherscan 无已验证源时):`GET /v2/contract/{chainId}/{address}?fields=sources` | `Sourcify`(new/fetch_sources), `parse_sourcify_sources(&Value) -> Vec<SourceFile>` |
 | `src/enrich.rs` | 经免费 Blockscout v2 的 best-effort 富化 + 发现:name tag、project URL、USD top 持仓(`--table`)、按 name/tag 搜合约 | `Blockscout`(fetch/search_contracts), `Enrichment{name_tag,project_url,holdings}`, `parse_search/parse_holdings/fmt_usd` |
 | **流水线 / 存储** | | |

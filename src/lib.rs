@@ -1346,15 +1346,21 @@ pub fn merge(total: &mut RunStats, s: RunStats) {
     total.not_contract += s.not_contract;
     total.filtered += s.filtered;
     total.failed += s.failed;
+    total.degraded += s.degraded;
 }
 
 /// Print the final run summary line. In machine output modes (`json`/`ndjson`)
 /// it goes to stderr so stdout stays pure data.
 pub fn print_summary(s: &RunStats, fmt: OutputFormat) {
-    let line = format!(
+    let mut line = format!(
         "\nDone. saved={} (verified={}), skipped={}, non-contract={}, filtered={}, failed={}",
         s.saved, s.verified, s.skipped, s.not_contract, s.filtered, s.failed
     );
+    // Only shown when non-zero: a degraded scan is the exception, and a
+    // permanent `degraded=0` on every run trains the eye to skip it.
+    if s.degraded > 0 {
+        line.push_str(&format!(", degraded={}", s.degraded));
+    }
     if fmt == OutputFormat::Human {
         println!("{line}");
     } else {
@@ -1425,6 +1431,7 @@ mod tests {
             RunStats {
                 saved: 1,
                 verified: 1,
+                degraded: 1,
                 skipped: 2,
                 not_contract: 3,
                 filtered: 1,
@@ -1436,6 +1443,7 @@ mod tests {
             RunStats {
                 saved: 1,
                 verified: 0,
+                degraded: 0,
                 skipped: 0,
                 not_contract: 0,
                 filtered: 2,
@@ -1447,6 +1455,7 @@ mod tests {
         assert_eq!(t.skipped, 2);
         assert_eq!(t.not_contract, 3);
         assert_eq!(t.filtered, 3);
+        assert_eq!(t.degraded, 1);
         assert_eq!(t.failed, 5);
     }
 

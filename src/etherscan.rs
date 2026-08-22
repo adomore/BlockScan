@@ -159,6 +159,21 @@ pub fn is_rate_limited(text: &str) -> bool {
     t.contains("rate limit") || t.contains("max calls per sec")
 }
 
+/// True when a non-success envelope means "the explorer has no such record"
+/// rather than "the request did not succeed".
+///
+/// Both arrive as `status: "0"`; only the text tells them apart. Only the
+/// absence side is enumerated, so an envelope this does not recognise -- a rate
+/// limit, a rejected key, a message added next year -- is a failure.
+/// Enumerating the failure side instead is what lets a new error string quietly
+/// become an absence.
+fn means_absent(message: &str, detail: &str) -> bool {
+    const ABSENT: [&str; 2] = ["no data found", "no record found"];
+    let m = message.to_ascii_lowercase();
+    let d = detail.to_ascii_lowercase();
+    ABSENT.iter().any(|p| m.contains(p) || d.contains(p))
+}
+
 /// Parse a `getsourcecode` response body into a [`SourceCodeResult`].
 ///
 /// `result` is normally an array, but on error (invalid key, rate limit) it is a
@@ -183,20 +198,33 @@ pub fn parse_source_code(text: &str) -> Result<SourceCodeResult> {
     Ok(result)
 }
 
-/// Parse a `getcontractcreation` response body. Returns `None` when not found.
+/// Parse a `getcontractcreation` response body.
+///
+/// Three outcomes, deliberately distinct: `Ok(Some)` the record exists,
+/// `Ok(None)` the explorer answered and there is no record, `Err` the request
+/// did not succeed. Folding the last two together -- which is what returning
+/// `None` for every `status != "1"` did -- makes a rate-limited lookup
+/// indistinguishable from a contract with no creation record, and the caller
+/// then writes that absence to disk as fact.
 pub fn parse_creation(text: &str) -> Result<Option<CreationResult>> {
     let env: Envelope<serde_json::Value> = serde_json::from_str(text)
         .map_err(|e| AppError::Etherscan(format!("getcontractcreation parse failed: {e}; body={text}")))?;
 
     if env.status != "1" {
-        return Ok(None);
+        let detail = env.result.as_str().unwrap_or_default();
+        if means_absent(&env.message, detail) {
+            return Ok(None);
+        }
+        let shown = if detail.is_empty() { env.message.as_str() } else { detail };
+        return Err(AppError::Etherscan(format!("getcontractcreation failed: {shown}")));
     }
-    let arr = match env.result.as_array() {
-        Some(a) => a,
-        None => return Ok(None),
-    };
+    let arr = env.result.as_array().ok_or_else(|| {
+        AppError::Etherscan(format!("getcontractcreation: unexpected result shape; body={text}"))
+    })?;
     match arr.first() {
         Some(v) => Ok(Some(serde_json::from_value(v.clone())?)),
+        // A success envelope with an empty array: answered, and empty. The one
+        // shape where absence is unambiguous.
         None => Ok(None),
     }
 }
@@ -275,10 +303,34 @@ mod tests {
         assert!(parse_creation(body).unwrap().is_none());
     }
 
+    /// T-05 inverted this. `parse_source_code` has always called the same
+    /// envelope "unexpected result shape" and errored; reading it as an absence
+    /// here was the asymmetry the task exists to remove.
     #[test]
-    fn parse_creation_result_not_array_is_none() {
+    fn parse_creation_result_not_array_is_a_failure() {
         let body = r#"{"status":"1","message":"OK","result":"weird"}"#;
-        assert!(parse_creation(body).unwrap().is_none());
+        let err = parse_creation(body).unwrap_err().to_string();
+        assert!(err.contains("unexpected result shape"), "{err}");
+    }
+
+    /// The acceptance test: one body, both parsers, one classification.
+    #[test]
+    fn a_rate_limited_body_is_a_failure_in_both_parsers() {
+        let body = r#"{"status":"0","message":"NOTOK","result":"Max calls per sec rate limit reached (5/sec)"}"#;
+        assert!(is_rate_limited(body), "the fixture must be a real rate-limit body");
+        let src = parse_source_code(body).unwrap_err().to_string();
+        let creation = parse_creation(body).unwrap_err().to_string();
+        assert!(src.contains("rate limit"), "{src}");
+        assert!(creation.contains("rate limit"), "{creation}");
+    }
+
+    /// Absence is a whitelist, so a message the explorer adds later cannot
+    /// quietly become "this contract has no creation record".
+    #[test]
+    fn parse_creation_unknown_status0_message_is_a_failure() {
+        let body = r#"{"status":"0","message":"NOTOK","result":"Invalid API Key"}"#;
+        let err = parse_creation(body).unwrap_err().to_string();
+        assert!(err.contains("Invalid API Key"), "{err}");
     }
 
     #[test]

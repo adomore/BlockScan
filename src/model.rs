@@ -156,6 +156,16 @@ pub struct ContractDetails {
     /// Heuristic security audit. `None` when auditing is disabled (`--no-audit`).
     #[serde(default)]
     pub audit: Option<Audit>,
+
+    /// Lookups this scan asked for and did not get an answer to, by name
+    /// (`creation`, ...). Empty on a complete record, and omitted from the JSON
+    /// when empty so existing output is unchanged.
+    ///
+    /// A field left `None` because a lookup failed and a field left `None`
+    /// because there is nothing to record are the same bytes on disk. This list
+    /// is what tells them apart.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub incomplete: Vec<String>,
 }
 
 impl ContractDetails {
@@ -167,6 +177,7 @@ impl ContractDetails {
             chain_id,
             block_number: None,
             block_hash: None,
+            incomplete: Vec::new(),
             bytecode: String::new(),
             bytecode_size: 0,
             balance_wei: "0".to_string(),
@@ -249,6 +260,7 @@ mod tests {
             chain_id: 1,
             block_number: None,
             block_hash: None,
+            incomplete: Vec::new(),
             bytecode: "0x6001".into(),
             bytecode_size: 2,
             balance_wei: "0".into(),

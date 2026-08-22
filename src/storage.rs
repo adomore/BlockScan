@@ -372,6 +372,7 @@ mod tests {
             chain_id: 1,
             block_number: None,
             block_hash: None,
+            incomplete: Vec::new(),
             bytecode: "0x6001".into(),
             bytecode_size: 2,
             balance_wei: "0".into(),

@@ -43,6 +43,10 @@ pub struct Scanner {
 pub struct RunStats {
     pub saved: usize,
     pub verified: usize,
+    /// Saved, but with at least one lookup unanswered -- see
+    /// `ContractDetails::incomplete`. A subset of `saved`, not a separate
+    /// bucket: the contract is on disk, it is just not fully described.
+    pub degraded: usize,
     pub skipped: usize,
     pub not_contract: usize,
     pub filtered: usize,
@@ -243,13 +247,19 @@ impl Scanner {
         // 2. Etherscan source + metadata.
         let src = self.etherscan.get_source_code(address_str).await?;
 
-        // 3. Creation info (best-effort; failure here is non-fatal).
-        let creation = self
-            .etherscan
-            .get_contract_creation(address_str)
-            .await
-            .ok()
-            .flatten();
+        // 3. Creation info. Non-fatal either way -- one enrichment lookup should
+        //    not sink the contract -- but a failure and a genuine absence are
+        //    recorded differently: the failure is carried into `incomplete` so
+        //    the missing creator reads as unanswered, not as "none exists".
+        let mut incomplete: Vec<String> = Vec::new();
+        let creation = match self.etherscan.get_contract_creation(address_str).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("{address_str}: creation lookup failed: {e}");
+                incomplete.push("creation".to_string());
+                None
+            }
+        };
 
         let mut built =
             build_details(address_str, self.cfg.chain_id, &code, balance, src, creation);
@@ -258,6 +268,7 @@ impl Scanner {
         // the contract, so it is applied here where the scan knows it.
         built.details.block_number = self.rpc.pinned_block();
         built.details.block_hash = self.block_hash.clone();
+        built.details.incomplete = incomplete;
 
         // Storage-slot proxy fallback (EIP-1967/1822) when no implementation yet.
         if built.details.implementation.is_none() {
@@ -375,6 +386,7 @@ pub fn build_details(
         // Pure over its inputs: the scan stamps the pin, not this function.
         block_number: None,
         block_hash: None,
+        incomplete: Vec::new(),
         bytecode_size: code.len(),
         bytecode,
         balance_wei: balance.to_string(),
@@ -418,6 +430,9 @@ pub fn fold_outcomes(results: Vec<SaveOutcome>) -> RunStats {
                 stats.saved += 1;
                 if details.is_verified {
                     stats.verified += 1;
+                }
+                if !details.incomplete.is_empty() {
+                    stats.degraded += 1;
                 }
             }
             SaveOutcome::Skipped(_) => stats.skipped += 1,

@@ -251,6 +251,66 @@ async fn mount_etherscan_ok(server: &MockServer) {
         .await;
 }
 
+/// Source resolves, the creation lookup is rate limited. The contract is real
+/// and must still be saved; what must not happen is `creator: null` written as
+/// if the explorer had answered.
+async fn mount_etherscan_creation_rate_limited(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(query_param("action", "getsourcecode"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(source_ok_body()))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("action", "getcontractcreation"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            r#"{"status":"0","message":"NOTOK","result":"Max calls per sec rate limit reached (5/sec)"}"#,
+        ))
+        .mount(server)
+        .await;
+}
+
+/// T-05: a lookup that failed is recorded as unanswered, not as absent.
+#[tokio::test]
+async fn a_failed_creation_lookup_degrades_the_record() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    mount_rpc_full(&rpc, "0x6080604052").await;
+    mount_etherscan_creation_rate_limited(&es).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    run(
+        addresses_cli(&rpc.uri(), &es.uri(), tmp.path().to_str().unwrap(), false),
+        std::future::ready(()),
+    )
+    .await
+    .unwrap();
+
+    let v: Value = serde_json::from_str(&read_metadata(tmp.path())).unwrap();
+    assert_eq!(v["incomplete"], json!(["creation"]), "the failure must be on the record");
+    assert!(v["creator"].is_null(), "nothing was learned, so nothing is claimed");
+}
+
+/// The same field must stay off a record where every lookup was answered, or it
+/// carries no information.
+#[tokio::test]
+async fn a_complete_scan_records_nothing_as_incomplete() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    mount_rpc_full(&rpc, "0x6080604052").await;
+    mount_etherscan_ok(&es).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    run(
+        addresses_cli(&rpc.uri(), &es.uri(), tmp.path().to_str().unwrap(), false),
+        std::future::ready(()),
+    )
+    .await
+    .unwrap();
+
+    let raw = read_metadata(tmp.path());
+    assert!(!raw.contains("incomplete"), "an unremarkable scan must not say so: {raw}");
+}
+
 /// Verified-source body whose Solidity uses `tx.origin` (a source-level finding).
 fn source_txorigin_body() -> String {
     json!({
