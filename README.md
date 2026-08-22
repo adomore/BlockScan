@@ -391,6 +391,19 @@ Tagged releases attach a prebuilt Windows binary on the GitHub **Releases** page
 
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+### [1.1.0] - 2026-08-22
+
+Two strands since 1.0.0: eight phases deepening the audit engine's precision through the binding graph, and an external source-and-documentation audit whose 17-task manifest is now 13 tasks complete. Every corpus number below was measured against the committed 42-contract corpus, not estimated.
+
+- **Audit precision (phases 23-30).** Reentrancy state writes and access-control decisions resolve through the binding graph rather than through names: a privileged function is judged by what it writes, `_msgSender()` counts as the caller, the reentrancy call surface covers contract-typed and cast receivers (`IERC20(a).m()`), and compound initializers are no longer followed. Corpus effect: `PROXY_UNPROTECTED_INITIALIZER` 17 -> 1, `WEAK_BLOCK_RANDOMNESS` 13 -> 0, `UNSAFE_DOWNCAST_TRUNCATION` 138 -> 107, all rules 817 -> 773 occurrences.
+- **Reproducibility (T-04).** Every state read routes through one block, resolved once at scan start or chosen with `--at-block`; `metadata.json` records `block_number` and `block_hash`. Two scans at the same pin produce byte-identical output.
+- **MCP hardening (T-01/02/03).** The output directory is constrained to the server's base; HTTP mode requires a bearer credential and mints one when started without it; the outbound RPC endpoint comes from a launch-time allow-list instead of the request, and transport failures are collapsed so the tool cannot serve as a port scanner.
+- **Detection scope (T-06/07).** The Chainlink staleness and unprotected-initializer rules take their scope from a function body instead of a fixed line count, so a guard belonging to an adjacent call no longer suppresses one that has none. Proxy detection gained the pre-standard zeppelinos slot and EIP-2535 diamonds via the loupe.
+- **Honest output (T-05/T-16).** A failed explorer lookup is recorded as unanswered rather than as absence, and the run reports it as degraded; the risk score now states how many findings suppression removed from it.
+- **New surfaces.** `blockscan bundle` produces a verifiable result bundle (in-toto Statement + SLSA provenance, sha256 and keccak256 digests, detached cosign signature); `--manifest report.md` / `report.html` produce a document rather than a row per contract; `import.rs` normalises another analyser's results into the same shape without touching the score.
+- **Hygiene (T-15/T-17).** `rust-version = "1.97.1"` is declared with a CI job that builds against exactly it; the README pair is structurally checked in CI; parse errors no longer embed an unbounded response body.
+- Engineering: **794 tests** (667 unit + 112 integration + 11 MCP hardening + 4 docs lockstep), `cargo clippy --all-targets` zero warnings.
+
 ### [1.0.0] - 2026-06-30
 
 First stable release (everything since 0.1.0 hardened into 1.0). On top of 0.1.0:
