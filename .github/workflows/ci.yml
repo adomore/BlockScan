@@ -12,6 +12,10 @@ env:
 jobs:
   # The three gates the README documents. Integration tests mock every remote
   # (wiremock), so no job needs network access beyond fetching crates.
+  #
+  # There is no `paths:` filter on purpose: tests/docs_lockstep.rs enforces the
+  # structural parity of each bilingual document pair, and a docs-only change is
+  # exactly the change that can break it.
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

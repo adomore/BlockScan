@@ -167,7 +167,9 @@ blockscan discover "Uniswap V4" --google-api-key AIza... --google-cse-id xxxx
 
 底层调用 `GET https://www.googleapis.com/customsearch/v1?key=<KEY>&cx=<CSE>&q=<查询>`，解析 `items[].link` 中的合约地址。
 
-`--table` 还会通过 **Blockscout 免费 API** 富化三项（best-effort，失败/无数据显示 `-`，不影响扫描）：
+### 富化表格（`--table`）
+
+`--table` 会通过 **Blockscout 免费 API** 富化三项（best-effort，失败/无数据显示 `-`，不影响扫描）：
 **名称标签**、**项目URL**、**代币持仓**（按 USD 取前 3，如 `WBTC(~$32.3M), USDC(~$57.5M) …`）。
 非主网用 `--blockscout-base` 指向对应链的 Blockscout，或置空 `--blockscout-base ""` 关闭富化。
 富化结果**按地址缓存**（同一次运行内重复地址不重复请求），并以 `--blockscout-rate`（默认 4/s）**令牌桶限速**，避免触发免费节点限流。
@@ -439,11 +441,20 @@ blockscan watch --trace
 - 多链 RPC 需各自通过 `ETH_RPC_URL_<id>` 提供；单链时直接用 `--rpc-url`。
 - CSV 汇总对以 `= + - @` 开头的字段加 `'` 前缀，避免电子表格公式注入。
 
+## 版本发布
+
+打了 tag 的版本会在 GitHub **Releases** 页附上预编译的 Windows 二进制：
+
+- `blockscan.zip` —— 内含 `blockscan.exe`（x86_64-pc-windows-msvc）。
+- `blockscan-<version>-x86_64-pc-windows-msvc.tar.gz` —— 二进制与 `README.md`、`LICENSE`、`RELEASE_NOTES.md` 打包。
+- `SHA256SUMS` —— 每个发布产物的 SHA-256 校验和（用 `sha256sum -c SHA256SUMS` 校验，PowerShell 用 `Get-FileHash`）。
+- `RELEASE_NOTES.md` —— 该版本的发布说明。
+
 ## 更新记录（Changelog）
 
 本项目所有重要变更记录于此。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [1.0.0] - 2026-06-30
+### [1.0.0] - 2026-06-30
 
 首个稳定版（自 0.1.0 起的全部能力固化为 1.0）。在 0.1.0 基础上新增/强化：
 
@@ -453,50 +464,10 @@ blockscan watch --trace
 - **发版前严苛审计**修复一批稳健性/安全问题：Etherscan 5xx/429 重试、websearch/github 状态与地址边界校验、`min_balance` fail-closed、Blockscout 失败不缓存、`storage` 写入边界 sanitize、MCP 常量时间 token 比较 + 拒绝 `Origin: null`、风险摘要稳定排序、AST 深度守卫覆盖扁平链；并补 MIT LICENSE 与发布元数据。
 - 工程：**637 测试**（532 单元 + 105 集成），`cargo clippy --all-targets` 零告警，全工作区行覆盖 ~97.9%。
 
-## [0.1.0] - 2026-06-28
+### [0.1.0] - 2026-06-28
 
-首个版本。
+首个版本：三种扫描模式、RPC + Etherscan V2 + Sourcify 数据源、多标准代理识别、静态分析 + 克隆聚类、标准化安全审计引擎、多来源 `discover`、防御监控、机器可读输出、MCP 服务器、多链扫描、续跑/去重。逐阶段设计记录见 [docs/](docs/)。
 
-### 新增 (Added)
-- **扫描模式**：`addresses`（指定地址）/ `range`（历史区块）/ `watch`（实时跟链头，Ctrl-C 优雅退出）。
-- **数据来源**：RPC（发现/字节码/余额） + Etherscan V2（源码/ABI/元信息/creator）；Etherscan 无验证源码时 **Sourcify v2 回退**（`verified_via` 记来源）。
-- **代理识别**：EIP-1167（字节码）· EIP-1967 implementation · Beacon（`eth_call implementation()` 解析真实逻辑地址）· EIP-1822 UUPS（`eth_getStorageAt`）；未验证合约也能识别。
-- **项目发现 `discover`**：Blockscout `/search`（名称）· GitHub 部署产物（hardhat-deploy + Foundry，含 `implementation`）+ **审计 scope 导入**（解析 `README.md` / `*scope*.md` 中的地址与 explorer 链接，直接对接 Code4rena / Sherlock 竞赛仓库）· `--website` 官网/文档同域浅爬（`--crawl-depth`，实测 Lido 单页入库 304 合约）· **`--defillama` 协议主合约** · **`--tokenlist` 标准 Token List 按 `--chain-id` 过滤（实测 Uniswap 列表 390 个 chain-1 合约）** · **`--topic` 链上 `eth_getLogs` 事件扫描（`--from/--to/--log-chunk/--log-concurrency`）** · Google Custom Search（`--google-api-key/--google-cse-id`）。
-- **富化 `--table`**：Blockscout 名称标签 / 项目 URL / 代币持仓（USD Top-3），按地址缓存 + `--blockscout-rate` 限速；中文归一化表格（CJK 宽度对齐、余额按 ETH）。
-- **多链 `--chains`**：一次扫多条 EVM 链（按链分目录、映射 explorer、`ETH_RPC_URL_<id>`）。
-- **过滤器**：`--only-verified` / `--min-balance` / `--only-proxy`。
-- **静态分析 `analysis`**：对已下载字节码零网络派生 —— ERC 接口识别（20/721/1155/165,`PUSHk <sel> EQ` 派发选择器,处理前导零缩短的 PUSH3,未验证也能识别）· 危险操作码标记（SELFDESTRUCT/DELEGATECALL/CALLCODE/CREATE/CREATE2,去元数据后带 PUSH 立即数跳过）· 字节码指纹 `code_hash`/`code_hash_nometa`（去 CBOR 元数据）· **克隆聚类**(`--manifest` 时落 `clusters.json`);随 metadata.json/CSV/表格输出;`examples/analyze.rs` 为性能探针(24KB≈0.13ms)。
-- **安全审计引擎(标准化 SecurityFinding v2)**：独立审计引擎,扫描同时检测漏洞并打分 —— 三层分类(OWASP SC Top 10 `category` → SWC `swc` → `rule_id`);**36 检测器**(基础 11 + 深度 25:Access 守卫/未保护提款、UUPS/upgrade、reentrancy、unchecked/downcast、Oracle spot-price/Chainlink、flash-loan 回调、blacklist/fee、**Governance**(闪电贷投票/无 timelock/零提案门槛)、**MEV**(swap deadline/slippage、approve race)、**Bridge-跨链**(replay/source-auth/lzReceive trusted-remote)),源码(注释/字符串感知)+ 字节码 + `scan_functions` 函数级窗口;**源码可解析时 8 条规则由 slang AST 精化**(tx-origin/unchecked-call/reentrancy CEI/access-control/weak-randomness/ecrecover 零校验/transfer-send 按实参个数辨 ETH-vs-ERC20/收窄 downcast,降低误报)**+ 1 条 AST-only `DELEGATECALL_ARBITRARY_TARGET`**(delegatecall 目标为形参可控地址,Parity 级接管);每条 finding 带 severity/confidence/impact/likelihood/exploitability/asset/blast-radius/priority/risk/scenario/recommendation/references;多因子评分 `impact×likelihood×confidence×exposure` + 按弱点键概率 OR 聚合 → 风险分 0–100 + 等级 A–F + risk_level + P0–P3;报告矩阵;`--no-audit`/`--min-risk`/`--only-vulnerable`;独立 `audit` 子命令离线重审;**SARIF 2.1.0 输出 + partialFingerprints**(`--format sarif`,GitHub Code Scanning 基线/去重)。
-- **机器可读输出 `--format json\|ndjson`**：stdout 只放结构化数据(`{run,stats,contracts}` 文档 / 逐合约 NDJSON 流),日志/进度/汇总转 stderr;便于 `jq` 与 agent 管道,亦为 MCP server 铺路。
-- **防御监控 `monitor`**：扫区间 `eth_getLogs` 解码安全事件(Upgraded/BeaconUpgraded/OwnershipTransferred/AdminChanged,可 `--alert-topic` 扩展)→ 结构化 `Alert` 落 `alerts.jsonl` / `--webhook-url` / stdout 流;`--watchlist` 限定监控地址;所有 sink 失败仅告警、监控不中断。**`--audit-deployments`**:审计区间内新部署合约并对 `risk≥--min-risk` 的发 `risky-deployment` 风险评分告警(每次重审、与 `--no-audit` 互斥)。**`--baseline`**:跨轮告警去重(稳定指纹 `chain|block|contract|event|tx_hash|log_index|…`,已见即抑制并持久化)。
-- **跟链头实时告警 `watch --alert-on-risk` / `--alert-events`**：`watch` 加告警开关即进入实时模式,每个确认块跑告警管线(新部署审计 + 安全事件),复用 `AlertSink`/`--baseline`;部分日志/回执失败不推进、下 tick 重扫(不静默跳过);纯 `--alert-events` 免 Etherscan key。
-- **审计抑制 `--suppress`**：JSON 抑制配置(`rule`/`contract`/`swc`/`category`/`fingerprint` 匹配,AND-within/OR-across),命中项评分前剔除(分数同步降);文件缺失/坏 JSON/无键条目仅 `warn`、不误抑制。扫描与离线 `audit` 均生效。
-- **监控事件扩展 + 节流(Phase 15)**：默认安全事件集 4→8(+RoleGranted/RoleRevoked/Paused/Unpaused,topic0 经 keccak 自校验);`--min-transfer` 大额 ERC-20 转账监控(opt-in、阈值过滤、自动排除 ERC-721);`--throttle` 同类突发封顶(键含 chain_id);`deliver_alert` 单一出口 seen→throttle→record→emit(被节流者不写基线,可跨轮重发)。
-- **MCP 服务器(Phase 16)**：`blockscan mcp` stdio JSON-RPC 2.0 服务器(手写、零新增运行时依赖),7 个 agent 可调用工具(audit_source/audit_corpus/get_contract/list_contracts/export_sarif/cluster_corpus/scan_addresses);`handle()` 纯函数进程内可测,stdout 纯净(日志走 stderr);tool-error 与 protocol-error 区分。详见 [docs/MCP_DESIGN.md](docs/MCP_DESIGN.md)。
-- **告警分组/摘要(Phase 17)**：`monitor`/`watch` 的 `--group` 把同 `(链, 合约, event)` 高频告警折叠成运行结束时一条 digest(键用 event 区分 Upgraded/BeaconUpgraded;risky 摘要保留最高 risk/grade);与 `--baseline` 正交、与 `--throttle` 互斥(group 优先并 warn)。新模块 `group.rs`。
-- **MCP 资源 + 有界区间工具(Phase 18)**：MCP 加 `resources/list`+`resources/read`(语料以 `blockscan://contract/<addr>` 暴露)、有界在线工具 `scan_block_range`/`monitor_range`(≤500 块);`ServerCtx` 让 `-o` 成为离线工具/资源的默认语料目录;`resources/read`/`get_contract` 地址经 `Address` 校验防路径穿越;`monitor_range` 收集式扫描严守 stdout 纯净。详见 [docs/MCP_DESIGN.md](docs/MCP_DESIGN.md)。
-- **SCWE/EthTrust 映射(审计 Phase 13)**：`SecurityFinding` 在 OWASP→SWC→rule_id 旁补 `scwe`(OWASP SCWE)与 `ethtrust`(EEA EthTrust [S]/[M]/[Q] 需求)两条外部引用,经研究验证只在高置信度精确匹配时赋值(29/40 规则),SARIF 以 tag + property 暴露;纯元数据、评分不变、旧 metadata 兼容。
-- **watch 周期 digest + 多链并行(Phase 19)**：`watch --group --digest-interval <secs>` 周期性 flush 摘要(非仅 shutdown);alert 模式放开 `--chains` 多链**并行** watch(各链独立 baseline/throttle/grouper,chain 维度键无锁,共享文件 append 行原子,单一 Ctrl-C 经 `Shared` 停全部);poll 计时器改持久 interval 杜绝被频繁 digest 饿死。
-- **MCP 本地 HTTP 传输(Phase 20)**：`blockscan mcp --http <addr>` 在回环地址起 Streamable HTTP 端点(单 `/mcp`,POST JSON-RPC;`hyper` 1.x,仅 `server`+`http1`),**原样复用** stdio 的 `handle` 与 9 工具/resources;仅绑 `127.0.0.1`、校验 `Origin`(精确 host 匹配防 DNS-rebinding)、body 经 `Limited` 有界读(>1 MiB→413)防 OOM、可选 `--http-token`(`BLOCKSCAN_MCP_TOKEN`)Bearer 鉴权;tools-only 无主动推流故无需 SSE/会话。详见 [docs/MCP_DESIGN.md](docs/MCP_DESIGN.md)。
-- **审计 AST 精化(审计 Phase 14)**：引入 `slang_solidity`(纯 Rust)对 `TX_ORIGIN_AUTH`(仅鉴权上下文:`==`/`!=`/`<`/`>`/`if`/`require`/`assert`)与 `UNCHECKED_LOW_LEVEL_CALL`(仅结果未被消费的低层 `.call`)做 AST 级精化,消除子串启发式的误报(`return tx.origin`、`mytx.origin`、`require(x.call())` 等),`detection=ast`;经典 `(bool ok,)=x.call{value:..}("")` 绑定未检查**仍报**(SWC-104,无漏报)。解析失败 / 深嵌套(防栈溢出)/ panic 自动降级回行级启发式;复用同 location 的启发式 evidence 保 SARIF 指纹稳定;**评分不变**。经 2 轮对抗式审查(共修 2 ship-blocker + 2 high)。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 函数内数据流(审计 Phase 15)**：为 `UNCHECKED_LOW_LEVEL_CALL` 的**绑定**形态加函数内、单变量数据流:per-occurrence 控制流分类(`classify_occurrence` 用 slang **入边标签**区分 if/while/for 的**条件 vs 体**、`return` 直接操作数 vs 元组/三元转发、赋值/声明的重绑定),并**每函数缓存一次**判定"绑定的成功布尔在调用后是否被 gate 检查"。消除主导误报 `(bool ok,)=a.call(); require(ok);`,同时**不漏**绑定未检查、if/while 体内用、`return g(ok)`、名字复用/内层 shadow 等 SWC-104。线性(经 1500 绑定调用/单函数回归)。经 **2 轮 ground-truth 对抗式审查(共修 5 个 ship-blocker/high)**。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 AST reentrancy(审计 Phase 16)**：`REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(SWC-107/CEI)从子串启发式升级为 AST:文件级收集**状态变量名**(`Name` 入边,正确处理 `S s;` 等用户类型),每 `function` 找最早低层外部调用(`.call`/`.delegatecall`/`.transfer`/`.send`),其后若有**状态变量**写(赋值/`++`/`delete`/元组解构/`push`-`pop`,基标识符 ∈ 状态集)且无 `nonReentrant` 守卫则在**调用行**报。精度提升:写**局部**变量、CEI 安全(写在调用前)、`staticcall` 不再误报;语句序精确。加入 `AST_RULES`,解析失败降级回启发式。经 **ground-truth 自审(修 3 个漏报:用户类型状态变量名、元组赋值、`push`/`pop`)**。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 AST access-control(审计 Phase 17)**：`ACCESS_MISSING_GUARD_PRIVILEGED_FN`(SC01/SCWE-016)从子串启发式升级为 AST:特权名(`is_privileged_name`)+ public/external + 有 `{}` 实现 + **非 view/pure** + 无守卫(结构化 `only*`/`auth`/`restrict` 修饰符、或 `require`/`if`/比较里的 `msg.sender`、或 `_checkOwner`/`_checkRole` 调用)才在 `function` 行报。精度提升:结构化修饰符(不被 `setOnlyX`/参数名误中)、精确可见性(不被函数类型参数 `external` 污染)、**全函数** `msg.sender` 扫描(不只前 280 字符)、跳过接口/抽象声明、排除 view/pure。指纹与启发式同 location 保持稳定。经 **ground-truth 自审(修 def_name 函数名包装 BUG + 接口声明误报)**。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 AST weak-randomness(审计 Phase 18)**：`WEAK_BLOCK_RANDOMNESS`(SC09/SCWE-024,误报最多的启发式之一)从子串启发式升级为 AST:区块源(`block.timestamp`/`number`/`difficulty`/`prevrandao` 或 `blockhash(..)`)仅当处于**随机数上下文**(`% 取模` 的 `MultiplicativeExpression`、或 `keccak256`/`sha256`/`ripemd160` 种子)才在区块源行报,按行去重。精度提升:`require(block.timestamp>=deadline)`、`last=block.timestamp`、`if(block.number>x)`、`block.timestamp+3600`、`block.timestamp/2` 等合法时间/记账用途**不再误报**。指纹稳定。经 **ground-truth 自审(逻辑简单,未发现新缺陷)**。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 AST ecrecover(审计 Phase 19)**：`ECRECOVER_NO_ZERO_CHECK`(SC04/SWC-122)从子串启发式升级为 AST:`ecrecover(..)` 的恢复地址未与 `address(0)`/`0` 比较(内联 `ecrecover(..)!=address(0)`,或经绑定变量 `address s=ecrecover(..); require(s!=address(0))`,扫 `EqualityExpression` 零标记;精确匹配不误中 `address(0x123)`/`==100`)才在 ecrecover 行报。精度提升:写得好的签名验证(`require(s!=address(0))`/`if(s==address(0))revert`,EIP-2612 permit/meta-tx)**不再误报**;复用 Phase 15 的 `binding_name`+`enclosing_function`。指纹稳定。经 **ground-truth 自审(未发现新缺陷)**。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 AST 任意 delegatecall(审计 Phase 20)**：**新增** AST-only 检测器 `DELEGATECALL_ARBITRARY_TARGET`(SC06/SWC-112/SCWE-035,**Critical**,检测器 35→36):仅当 `.delegatecall` 的**目标基标识符 ∈ 所在函数形参**(调用者可控、Parity 钱包级合约接管)才在调用行报;复用 `enclosing_function` + 新 `function_param_names`(`Parameter` 的 `Name` 入边)。正确隔离每函数作用域(他函数形参、固定 `impl` 状态变量目标**不误报**),正确命中 modifier/constructor 形参、形参遮蔽同名状态变量;与泛化 `DELEGATECALL_USAGE` 同 `swc` 去重。AST-only(无对应行启发式),解析失败即静默不报。经 **ground-truth 自审(7 主用例 + 5 边界全过,未发现新缺陷)**。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **审计 AST transfer/send + 收窄 cast(审计 Phase 21)**:把**两条误报最高的启发式**升级为 AST(`AST_RULES` 6→8)。`HARDCODED_GAS_TRANSFER_SEND` 按**实参个数**判别——1 参 `addr.transfer/send(x)` = ETH stipend send(2300 gas)才报、≥2 参 = ERC-20 `transfer(to,amt)`/`transferFrom(...)` 不报,消除 `dai.transfer(to,amt)` 误报(顺带召回无关键词的 `addr.transfer(x)`);实参为字符串/字节字面量或 `abi.encode*` 则为消息发送(`bridge.send(payload)`)不报。`UNSAFE_DOWNCAST_TRUNCATION`:收窄 `uintN/intN`(N<256)仅当实参非字面量、非同族等宽/更窄嵌套转换、非 `uint160+(address(..))` 无损转型才报。经 **两轮对抗式审查**(ground-truth 自审修 1 个 trivia 导航缺陷;3-lens 多智能体审查 37 用例,修 2 类零漏报结构性误报:`uint160(address(x))`、`bridge.send(payload)`);依赖类型解析的残余误报(`uint160(addrVar)`/`uint8(enumVar)`/标识符接收者)明确推迟到下一阶段。详见 [docs/AUDIT_DESIGN.md](docs/AUDIT_DESIGN.md)。
-- **工厂合约发现** `--trace`（`trace_block`，CREATE/CREATE2，失败仅告警）。
-- **汇总导出** `--manifest index.json|csv`。
-- **健壮性**：RPC 强制 HTTP/1.1 + 超时；`--retries` 可配重试；**Etherscan 限流自动退避重试**；断点续跑去重（`--overwrite` 强制重拉）。
-- `examples/resolve_proxy.rs` 真链探测代理小工具。
+## 许可
 
-### 安全 (Security)
-- MCP HTTP 传输(Phase 20)仅绑回环、精确解析 `Origin` host 防 DNS-rebinding(挡 `http://localhost.evil.com` 之类后缀伪装)、`Limited` 有界读 body 防 OOM-DoS;可选 `--http-token` Bearer 鉴权。**不带 token 时端点信任本机任意进程**(已在文档显式声明)。
-- 审计 AST 层(Phase 14)解析不可信的已验证源码:`slang_solidity` 解析器对部分输入会 **panic**(以 `catch_unwind` 容纳)或在深嵌套表达式上**栈溢出**(Windows 下 `catch_unwind` 拦不住,故解析**前**以 `too_deeply_nested` 守护、超阈即降级)——两者均不会崩溃审计。
-- CSV 汇总对以 `= + - @` / 制表符 开头的字段加 `'` 前缀，防电子表格公式注入。
-- 发现来源的地址统一经 `valid_address`（长度/十六进制/非零）+ 链上 `eth_getCode` 校验，剔除 EOA 与畸形地址。
-- 源码落盘对路径做 sanitize 并校验,拒绝越出 `source/` 的写入。
-
-### 工程 (Internal)
-- lib + bin 结构；**637 个测试**（532 单元 + 105 集成，wiremock mock RPC/Etherscan/Blockscout/Sourcify/GitHub/Google/website/DefiLlama/TokenList/CoinGecko，不走真网；含驱动真实二进制断言 stdout 纯净的输出/监控/审计/SARIF/**MCP stdio + HTTP** 测试）；`cargo clippy` 零告警；全工作区行覆盖 **97.9%**（`audit.rs` 100%，`ast.rs` 97.0%，`mcp.rs` 97.6%）。
+[MIT](LICENSE) © 2026 adomore

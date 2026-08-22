@@ -360,7 +360,15 @@ The largest single gap is `lib.rs` at **91.3%** (roughly four in ten of all unco
 
 ## Factory discovery (`--trace`)
 
-Default block discovery uses receipt `contract_address` (top-level deploys only). With `--trace`, `range`/`watch` also call `trace_block` per block to find contracts deployed **internally** via CREATE/CREATE2, merged + deduped with receipts. Requires an RPC with the `trace_` namespace (Erigon / Reth / Nethermind / archive providers); if unsupported, the `trace_block` call is warned-and-skipped (not fatal).
+Default block discovery uses receipt `contract_address` (top-level deploys only). With `--trace`, `range`/`watch` also call `trace_block` per block to find contracts deployed **internally** via CREATE/CREATE2, merged + deduped with receipts.
+
+```bash
+blockscan range --from 19000000 --to 19000010 --trace
+blockscan watch --trace
+```
+
+- Requires an RPC with the `trace_` namespace enabled (Erigon / Reth / Nethermind / archive providers).
+- If the RPC does not support it, the `trace_block` call is **warned-and-skipped** (not fatal); the block is still processed for top-level deploys.
 
 ## Known limitations
 
