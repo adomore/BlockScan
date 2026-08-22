@@ -323,6 +323,7 @@ In machine modes **stdout is data only** (pipe to `jq`); `monitor`/`watch` stdou
 | `--rpc-url` / `ETH_RPC_URL` | — | JSON-RPC endpoint |
 | `--etherscan-key` / `ETHERSCAN_API_KEY` | — | Etherscan V2 key |
 | `--chain-id` | 1 | Chain id |
+| `--at-block <BLOCK>` | — | Read chain state as of this block (default: resolve the head once at start and pin the whole run) |
 | `--chains 1,10,…` | — | Scan multiple chains in one run |
 | `-o`/`--out` | `output` | Output directory |
 | `--concurrency` | 5 | Contracts processed concurrently |

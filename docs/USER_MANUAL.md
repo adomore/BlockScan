@@ -323,6 +323,7 @@ blockscan mcp -o out --http 127.0.0.1:9000 \
 | `--rpc-url` / `ETH_RPC_URL` | — | JSON-RPC 端点 |
 | `--etherscan-key` / `ETHERSCAN_API_KEY` | — | Etherscan V2 key |
 | `--chain-id` | 1 | 链 id |
+| `--at-block <BLOCK>` | — | 按指定区块读链上状态（缺省：启动时解析一次 head 并固定整轮扫描）|
 | `--chains 1,10,…` | — | 多链一次扫 |
 | `-o`/`--out` | `output` | 输出目录 |
 | `--concurrency` | 5 | 并发处理合约数 |
