@@ -309,7 +309,7 @@ fn spec(rule_id: &str) -> RuleSpec {
             blast_radius: "protocol",
             exploit_scenario: "The tuple is consumed but only `answer` is read; a stale feed values positions at an outdated price.",
             recommendation: "After latestRoundData() require updatedAt freshness, answer>0, and answeredInRound>=roundId before using the price.",
-            fp_notes: "No dataflow: validation may live in a helper/modifier outside the window — both FP and FN possible; Low confidence.",
+            fp_notes: "Scoped to the calling function and to the tuple names the call binds; no interprocedural dataflow, so freshness validated inside a helper or a modifier still reads as unchecked. Low confidence.",
         },
         "FLASHLOAN_CALLBACK_MISSING_CALLER_OR_INITIATOR_AUTH" => RuleSpec {
             title: "Flash-loan callback without caller/initiator validation",
@@ -666,46 +666,103 @@ fn scan_source_file(path: &str, content: &str, out: &mut Vec<RawHit>) {
         for rid in line_hits(code) {
             out.push(RawHit { rule_id: rid, detection: "source", location: Some(loc.clone()), evidence: ev() });
         }
-        // Cross-line: unprotected initialize() — look ahead to the body `{` for a guard.
-        if code.contains("function initialize(")
-            && initializer_has_body(&stripped, i)
-            && initializer_is_reachable(&stripped, i)
-            && !initializer_guarded(&stripped, i)
-        {
-            out.push(RawHit {
-                rule_id: "PROXY_UNPROTECTED_INITIALIZER",
-                detection: "source",
-                location: Some(loc.clone()),
-                evidence: ev(),
-            });
-        }
-        // Cross-line: Chainlink latestRoundData() without a staleness check nearby.
-        if code.contains(".latestRoundData(") && !staleness_checked(&stripped, i) {
-            out.push(RawHit {
-                rule_id: "CHAINLINK_LATESTROUNDDATA_NO_STALENESS_CHECK",
-                detection: "source",
-                location: Some(loc.clone()),
-                evidence: ev(),
-            });
-        }
     }
 
     // Function-scoped (windowed) detectors over the brace-balanced functions.
     function_window_hits(&stripped.join("\n"), path, out);
 }
 
-/// True if a staleness/validity guard appears within ~12 lines after a Chainlink
-/// `latestRoundData()` call (updatedAt / answeredInRound / timestamp / require ...).
-fn staleness_checked(lines: &[String], start: usize) -> bool {
-    let end = (start + 12).min(lines.len());
-    lines[start..end].iter().any(|l| {
-        l.contains("updatedAt")
-            || l.contains("answeredInRound")
-            || l.contains("roundId")
-            || l.contains("block.timestamp")
-            || l.contains("require(")
-            || l.contains("revert")
-            || l.contains("> 0")
+/// Whether the `latestRoundData()` call at byte offset `call` in `body` has the
+/// freshness it returns actually checked.
+///
+/// The old question was "is there a `require(` within twelve lines", which a
+/// require belonging to the next statement answers with a yes. The question here
+/// is the one the rule means: *does the freshness this call returns participate
+/// in a comparison in this function*. So the tuple the call is destructured into
+/// is what gets read, and only the names bound to its non-price slots count.
+///
+/// A call whose freshness slots are all discarded — `(, int p, , ,) =
+/// feed.latestRoundData()` — binds no freshness name at all and is unchecked by
+/// construction, which is exactly the shape the rule exists to catch.
+///
+/// Known limitation, unchanged from before and still recorded in `fp_notes`:
+/// freshness handed to a helper (`_requireFresh(updatedAt)`) is not recognised
+/// as a check, because nothing here follows it into the callee.
+fn staleness_checked(body: &str, call: usize) -> bool {
+    let names = freshness_names(body, call);
+    if names.is_empty() {
+        return false;
+    }
+    // Only what follows the call's own statement can check its result.
+    let Some(semi) = body[call..].find(';') else { return false };
+    body[call + semi + 1..].split(';').any(|stmt| {
+        has_comparison(stmt) && names.iter().any(|n| contains_word(stmt, n))
+    })
+}
+
+/// The tuple names bound to the non-price slots of a `latestRoundData()` result:
+/// `roundId`, `startedAt`, `updatedAt`, `answeredInRound`. Slot 1 is `answer` —
+/// the price itself — and `require(answer > 0)` is a sanity check on the value,
+/// never evidence that the value is current.
+fn freshness_names(body: &str, call: usize) -> Vec<String> {
+    // Bound the search to the statement the call is in, so a call used as a bare
+    // expression cannot pick up the `=` of some earlier assignment.
+    let stmt_start = body[..call].rfind([';', '{', '}']).map_or(0, |i| i + 1);
+    let head = body[stmt_start..call].trim_end();
+    let Some(eq) = head.rfind('=') else { return Vec::new() };
+    if head[..eq].trim_end().ends_with(['=', '!', '<', '>']) {
+        return Vec::new(); // a comparison, not an assignment
+    }
+    let lhs = head[..eq].trim_end();
+    if !lhs.ends_with(')') {
+        return Vec::new(); // assigned to a single variable, not destructured
+    }
+    // Backward-balance to the `(` that opens the tuple.
+    let b = lhs.as_bytes();
+    let mut depth = 0i32;
+    let mut open = None;
+    for i in (0..b.len()).rev() {
+        match b[i] {
+            b')' => depth += 1,
+            b'(' => {
+                depth -= 1;
+                if depth == 0 {
+                    open = Some(i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(open) = open else { return Vec::new() };
+    lhs[open + 1..lhs.len() - 1]
+        .split(',')
+        .enumerate()
+        .filter(|(slot, _)| *slot != 1)
+        .filter_map(|(_, s)| slot_name(s))
+        .collect()
+}
+
+/// The variable a tuple slot declares: `uint256 updatedAt` -> `updatedAt`, an
+/// empty slot -> `None`.
+fn slot_name(slot: &str) -> Option<String> {
+    slot.split(|c: char| !c.is_alphanumeric() && c != '_')
+        .rfind(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// Whether `stmt` compares anything at all.
+fn has_comparison(stmt: &str) -> bool {
+    stmt.contains('<') || stmt.contains('>') || stmt.contains("==") || stmt.contains("!=")
+}
+
+/// Whether `word` occurs in `hay` as a whole identifier — `updatedAt` must not
+/// match inside `lastUpdatedAt`.
+fn contains_word(hay: &str, word: &str) -> bool {
+    let is_id = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    hay.match_indices(word).any(|(i, _)| {
+        !hay[..i].chars().next_back().is_some_and(is_id)
+            && !hay[i + word.len()..].chars().next().is_some_and(is_id)
     })
 }
 
@@ -713,6 +770,10 @@ fn staleness_checked(lines: &[String], start: usize) -> bool {
 struct FnView {
     name_lc: String,
     header_off: usize,
+    /// Byte offset of the first character of `body` within the joined source, so
+    /// a hit inside the body can be reported at its own line rather than at the
+    /// function header.
+    body_off: usize,
     signature: String,
     body: String,
 }
@@ -750,6 +811,18 @@ fn function_window_hits(joined: &str, path: &str, out: &mut Vec<RawHit>) {
         }
         if is_flashloan_callback(&f.name_lc) && !flashloan_authed(&f.signature, &f.body) {
             emit("FLASHLOAN_CALLBACK_MISSING_CALLER_OR_INITIATOR_AUTH");
+        }
+
+        // ---- T-06: promoted here from a fixed look-ahead of N lines ----
+        // `scan_functions` only yields functions that open a body, so the
+        // bodiless interface declarations that were 16 of this rule's 17 corpus
+        // findings before Phase 29 are excluded by the scope itself rather than
+        // by a separate check.
+        if f.name_lc == "initialize"
+            && initializer_is_reachable(&f.signature)
+            && !initializer_guarded(&f.signature, &f.body)
+        {
+            emit("PROXY_UNPROTECTED_INITIALIZER");
         }
 
         // ---- Phase 11: Governance / MEV / Bridge (function-window) ----
@@ -804,6 +877,26 @@ fn function_window_hits(joined: &str, path: &str, out: &mut Vec<RawHit>) {
             && !contains_any(&f.body, &["require(msg.sender == address(endpoint", "require(_msgSender() == address(endpoint", "onlyEndpoint", "trustedRemote", "trustedRemoteLookup", "keccak256(_srcAddress)"])
         {
             emit("LZRECEIVE_MISSING_TRUSTED_REMOTE_CHECK");
+        }
+
+        // Past the last `emit`, whose borrow of `out` ends here: unlike every
+        // rule above, this one reports per call site rather than once per
+        // function, and needs its own location.
+        for (call, _) in f.body.match_indices(".latestRoundData(") {
+            if staleness_checked(&f.body, call) {
+                continue;
+            }
+            // Report at the call, not at the function header: one function can
+            // hold several feeds and only some of them be checked.
+            let abs = f.body_off + call;
+            let line_start = joined[..abs].rfind('\n').map_or(0, |i| i + 1);
+            let line_end = joined[abs..].find('\n').map_or(joined.len(), |i| abs + i);
+            out.push(RawHit {
+                rule_id: "CHAINLINK_LATESTROUNDDATA_NO_STALENESS_CHECK",
+                detection: "source",
+                location: Some(format!("{path}:{}", joined[..abs].matches('\n').count() + 1)),
+                evidence: joined[line_start..line_end].trim().chars().take(160).collect(),
+            });
         }
     }
 }
@@ -914,7 +1007,13 @@ fn scan_functions(joined: &str) -> Vec<FnView> {
         // (string literals keep their bytes) so back up to a char boundary.
         let end = floor_char_boundary(joined, close.unwrap_or((open + 8000).min(b.len())));
         let body = joined[open + 1..end].to_string();
-        out.push(FnView { name_lc: name.to_ascii_lowercase(), header_off: kw, signature, body });
+        out.push(FnView {
+            name_lc: name.to_ascii_lowercase(),
+            header_off: kw,
+            body_off: open + 1,
+            signature,
+            body,
+        });
         search = open + 1;
     }
     out
@@ -1022,64 +1121,26 @@ fn flashloan_authed(sig: &str, body: &str) -> bool {
         || body.contains("initiator")
 }
 
-/// True if an `initializer`/`reinitializer`/`onlyInitializing` guard appears between
-/// the `function initialize(` line and the first `{` that opens its body.
-/// Whether the `function initialize(` at `start` opens a body, as opposed to
-/// being a bodiless declaration in an interface or an abstract contract.
+/// Whether an `initialize` is guarded, given its own signature and its own body.
 ///
-/// A declaration has nothing to guard and cannot be called, so reporting one is
-/// pure noise — measured on the corpus, 16 of the 17 findings this rule produced
-/// were interface declarations (`function initialize(address, address) external;`
-/// in `UniswapV2Pair`, `IPoolManager`, `IUniswapV3PoolActions`).
+/// Two forms count. On the signature, an OpenZeppelin-style modifier
+/// (`initializer` / `reinitializer(n)` / `onlyInitializing`), matched as a whole
+/// token so a parameter named `initializerData` is not mistaken for one. In the
+/// body, a caller check does the same job: UniswapV2Pair guards its `initialize`
+/// with `require(msg.sender == factory)`, and reporting it was this rule's
+/// second-largest false-positive class.
 ///
-/// Scanning forward from the signature, whichever of `;` and `{` comes first
-/// decides: `;` ends a declaration, `{` opens a body. Both can appear on one line
-/// (`function initialize(address a) external { x = a; }`), so their order within
-/// the line matters, and a signature may wrap across several lines before either
-/// shows up.
-fn initializer_has_body(lines: &[String], start: usize) -> bool {
-    for line in &lines[start..] {
-        match (line.find('{'), line.find(';')) {
-            (Some(brace), Some(semi)) => return brace < semi,
-            (Some(_), None) => return true,
-            (None, Some(_)) => return false,
-            (None, None) => {}
-        }
+/// The modifier test is deliberately confined to the signature. Reading it off
+/// body lines too — which is what walking forward from the header did — let
+/// `_initializer = msg.sender;` inside an unguarded body suppress the finding.
+fn initializer_guarded(sig: &str, body: &str) -> bool {
+    if ["initializer", "reinitializer", "onlyInitializing"]
+        .iter()
+        .any(|m| sig_word(sig, m))
+    {
+        return true;
     }
-    false
-}
-
-fn initializer_guarded(lines: &[String], start: usize) -> bool {
-    let mut opened = false;
-    let mut depth = 0usize;
-    for line in &lines[start..] {
-        // On the signature: an OpenZeppelin-style modifier.
-        if line.contains("initializer") || line.contains("onlyInitializing") {
-            return true; // covers initializer / reinitializer / onlyInitializing
-        }
-        // In the body: a caller check does the same job. UniswapV2Pair guards its
-        // initialize with `require(msg.sender == factory)` and says so in a comment
-        // — reporting it was the rule's second-largest false-positive class.
-        if opened && is_caller_check(line) {
-            return true;
-        }
-        for ch in line.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    opened = true;
-                }
-                '}' => {
-                    depth = depth.saturating_sub(1);
-                    if opened && depth == 0 {
-                        return false; // function ended, no guard seen
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    false
+    body.lines().any(is_caller_check)
 }
 
 /// Whether a line *checks* the caller, as opposed to merely mentioning it.
@@ -1099,28 +1160,16 @@ fn is_caller_check(line: &str) -> bool {
 /// could do anything. An `internal`/`private` function is unreachable from
 /// outside, and a `view`/`pure` one initializes nothing — Uniswap V4's
 /// `PositionInfoLibrary.initialize(...) internal pure` is both.
-fn initializer_is_reachable(lines: &[String], start: usize) -> bool {
-    let sig = initializer_signature(lines, start);
-    let has = |w: &str| {
-        sig.split(|c: char| !c.is_alphanumeric() && c != '_')
-            .any(|t| t == w)
-    };
-    (has("external") || has("public")) && !has("view") && !has("pure")
+fn initializer_is_reachable(sig: &str) -> bool {
+    (sig_word(sig, "external") || sig_word(sig, "public"))
+        && !sig_word(sig, "view")
+        && !sig_word(sig, "pure")
 }
 
-/// The signature text of the `function initialize(` at `start`: everything up to
-/// the body brace or the declaration semicolon, joined across wrapped lines.
-fn initializer_signature(lines: &[String], start: usize) -> String {
-    let mut sig = String::new();
-    for line in &lines[start..] {
-        let end = line.find('{').unwrap_or(line.len());
-        sig.push_str(&line[..end]);
-        sig.push(' ');
-        if line.contains('{') || line.contains(';') {
-            break;
-        }
-    }
-    sig
+/// Whether `word` appears in a signature as a whole token. Substring matching
+/// here reads a parameter name as a visibility keyword.
+fn sig_word(sig: &str, word: &str) -> bool {
+    sig.split(|c: char| !c.is_alphanumeric() && c != '_').any(|t| t == word)
 }
 
 /// Detectors that fire on a single comment-/string-stripped source line.
@@ -2042,6 +2091,119 @@ mod tests {
     fn fires(src: &str, rule: &str) -> bool {
         let (d, s) = verified(src, "v0.8.20");
         ids(&audit(&d, &s)).iter().any(|r| r == rule)
+    }
+
+    // ---- T-06: both window heuristics scoped to a function body ----
+
+    const STALE: &str = "CHAINLINK_LATESTROUNDDATA_NO_STALENESS_CHECK";
+
+    /// The acceptance test. A guard that belongs to a different call must not
+    /// suppress a call that has none — the failure a line count cannot avoid,
+    /// because twelve lines of source is not a scope.
+    #[test]
+    fn a_neighbouring_staleness_guard_does_not_cover_an_unguarded_feed() {
+        // One function, two feeds. The second is validated; the first is not.
+        let two_feeds = "function p() public {\n\
+            (, int256 b, , , ) = feedB.latestRoundData();\n\
+            priceB = b;\n\
+            (, int256 a, , uint256 upA, ) = feedA.latestRoundData();\n\
+            require(block.timestamp - upA < 3600);\n\
+            priceA = a;\n\
+        }";
+        assert!(fires(two_feeds, STALE), "the unvalidated feed must still be reported");
+
+        // Separate functions. The guard is four lines away from the unguarded
+        // call and inside a different body, which is the whole point.
+        let two_fns = "function b() public {\n\
+            (, int256 x, , , ) = feed.latestRoundData();\n\
+            priceB = x;\n\
+        }\n\
+        function a() public {\n\
+            (, int256 y, , uint256 u, ) = feed.latestRoundData();\n\
+            require(block.timestamp - u < 3600);\n\
+            priceA = y;\n\
+        }";
+        assert!(fires(two_fns, STALE), "a guard in the next function is not this function\\'s");
+    }
+
+    /// The other direction: a genuinely validated feed stays unreported, or the
+    /// rule is just "mentions latestRoundData".
+    #[test]
+    fn a_validated_feed_is_not_reported() {
+        assert!(!fires(
+            "function p() public { (uint80 r, int256 a, , uint256 u, uint80 air) = feed.latestRoundData(); require(u > block.timestamp - 3600); require(air >= r); price = a; }",
+            STALE
+        ));
+        // `if`/`revert` is the same check written the modern way.
+        assert!(!fires(
+            "function p() public { (, int256 a, , uint256 u, ) = feed.latestRoundData(); if (block.timestamp - u > 3600) revert Stale(); price = a; }",
+            STALE
+        ));
+    }
+
+    /// Checking the price is not checking its age, and the old window accepted
+    /// `> 0` as a staleness guard.
+    #[test]
+    fn validating_only_the_answer_is_not_a_staleness_check() {
+        assert!(fires(
+            "function p() public { (, int256 a, , , ) = feed.latestRoundData(); require(a > 0); price = a; }",
+            STALE
+        ));
+    }
+
+    /// Whole-identifier matching: a similarly named variable is not the one the
+    /// call bound.
+    #[test]
+    fn a_lookalike_identifier_does_not_count_as_the_guard() {
+        assert!(fires(
+            "function p() public { (, int256 a, , uint256 updatedAt, ) = feed.latestRoundData(); require(lastUpdatedAt < 3600); price = a; }",
+            STALE
+        ));
+    }
+
+    /// A guard in one function must not cover an unguarded `initialize` in
+    /// another — the same adjacency failure, on the other rule. This also pins
+    /// the substring bleed: walking forward line by line read `_initializer` in
+    /// an unguarded body as an OpenZeppelin `initializer` modifier.
+    #[test]
+    fn a_neighbouring_initializer_modifier_does_not_cover_an_unguarded_one() {
+        let src = "contract C {\n\
+            function initialize(address o) public {\n\
+                _initializer = msg.sender;\n\
+                owner = o;\n\
+            }\n\
+            function initialize(address o, uint256 n) public initializer {\n\
+                owner = o;\n\
+                nonce = n;\n\
+            }\n\
+        }";
+        let (d, s) = verified(src, "v0.8.20");
+        let a = audit(&d, &s);
+        let f = a
+            .findings
+            .iter()
+            .find(|f| f.rule_id == "PROXY_UNPROTECTED_INITIALIZER")
+            .expect("the unguarded overload must be reported");
+        assert_eq!(
+            f.locations.len(),
+            1,
+            "exactly the unguarded one, not both: {:?}",
+            f.locations
+        );
+    }
+
+    /// The Phase 29 result is a property of the scope now, not of a separate
+    /// check: `scan_functions` never yields a bodiless declaration.
+    #[test]
+    fn interface_declarations_stay_out_of_scope() {
+        assert!(!fires(
+            "interface I { function initialize(address a, address b) external; }",
+            "PROXY_UNPROTECTED_INITIALIZER"
+        ));
+        assert!(!fires(
+            "library L { function initialize(uint256 x) internal pure returns (uint256) { return x; } }",
+            "PROXY_UNPROTECTED_INITIALIZER"
+        ));
     }
 
     #[test]

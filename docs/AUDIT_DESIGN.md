@@ -1303,6 +1303,47 @@ a + b % 2**32  → 顶层 AdditiveExpression                    ← 要求顶层
 
 > 状态:✅ Phase 30 完成(编译期常量与可证明取模边界不再触发截断/随机数规则)。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。语料出现次数:randomness **13 → 0**、downcast **138 → 107**、全规则 817 → 773。全量 **693 测试** = 588 单元 + 105 集成,clippy 零告警(本机实测)。后续 Phase 31+:`ACCESS_MISSING_GUARD_PRIVILEGED_FN` 的 17 条(需「是否只写调用者自身状态」的判据);SafeCast「先转换后 require 校验」惯用法;`uint8(bytes[i])` 索引必然放得下。
 
+## T-06 两条窗口启发式提升到函数作用域
+
+外部审计清单 T-06。问题陈述很准确：**以使用点为锚是对的**——这正是它们与全文件关键字匹配的区别；但**行数不是作用域**，于是属于相邻调用的守卫会压掉一个本身无守卫的发现。
+
+### 修前行为
+
+| 规则 | 旧作用域 | 失效方式 |
+|---|---|---|
+| `CHAINLINK_LATESTROUNDDATA_NO_STALENESS_CHECK` | `start .. start+12` 行 | 窗口内任一 `require(` / `revert` / `> 0` / `block.timestamp` 即算已校验，哪怕它属于下一条语句、下一个 feed、甚至下一个函数 |
+| `PROXY_UNPROTECTED_INITIALIZER` | 从函数头向后逐行走、括号配平 | 修饰符关键字的子串匹配**同时作用于函数体行**：无守卫体内一句 `_initializer = msg.sender;` 就足以自我豁免 |
+
+### 修后
+
+两条规则均改由 `scan_functions` 产出的 `FnView`（括号配平得到的真实函数体）供给作用域，并入驻 `function_window_hits`。`FnView` 新增 `body_off`，使体内命中可以报在**自己那一行**——一个函数可以读多个 feed，而只校验了其中几个。
+
+**预言机从“附近有没有 require”改成“这次调用返回的新鲜度是否参与了比较”。** 具体地：读取该调用被解构到的元组，取其**非价格槽**（slot 0/2/3/4 = `roundId` / `startedAt` / `updatedAt` / `answeredInRound`）绑定的名字，再看这些名字是否在同一函数体后续语句的比较中出现（整标识符匹配，`updatedAt` 不能匹到 `lastUpdatedAt`）。
+
+由此得到一个依构造成立的判据：`(, int p, , ,) = feed.latestRoundData()` **根本没绑定任何新鲜度变量**，因此必然未校验——而这正是规则 `exploit_scenario` 描述的形态（“元组被消费但只读了 answer”）。同时 `require(answer > 0)` 不再算守卫：校验价格为正不是校验价格新鲜。
+
+初始化器侧的三个辅助函数减为两个：`initializer_has_body` **整个删除**——`scan_functions` 本就不产出无体声明，所以 Phase 29 花一个函数实现的“排除接口声明”现在是作用域的固有性质；`initializer_guarded` 改只在**签名**上找 OZ 修饰符（且改为整词匹配，`initializerData` 这类参数名不再误中），在**函数体**上找调用者检查。
+
+### 测量
+
+语料 42 个带源码合约，修前修后**逐行一致**：全规则 172 发现 / 773 出现次数，`PROXY_UNPROTECTED_INITIALIZER` 仍为 1（`PoolManager.sol:116`）——Phase 29 的 17 → 1 保持。
+
+一个必须说明的事实：**语料里没有任何 Chainlink 消费者**，该规则在 42 个合约上命中 0 次。所以“无回退”对它而言是空陈述，它的正确性只能由单元测试支撑。不把这个 0 当成证据。
+
+### 测试是否真能鉴别
+
+新增六个用例全绿并不说明什么，除非它们在**旧实现下会红**。临时把两个旧谓词逐字重实现后对同一批夹具跑一遍，五个夹具全部被旧代码误判：
+
+| 夹具 | 旧代码结论 |
+|---|---|
+| 同一函数两个 feed，第一个无守卫 | 已校验（错）|
+| 守卫在**下一个函数** | 已校验（错）|
+| `require(answer > 0)` | 已校验（错）|
+| `lastUpdatedAt` 近似名 | 已校验（错）|
+| 无守卫体内的 `_initializer` | 已守卫（错）|
+
+> 状态：✅ T-06 完成。`AST_RULES` 仍 8、检测器仍 36、rule_id / 评分 / 指纹不变。语料 172 发现 / 773 出现次数与修前完全相同。全量 **728 测试** = 607 单元 + 110 集成 + 11 MCP 硬化，clippy 零告警。
+
 ## 明确的局限(诚实声明)
 - 启发式 linter,非形式化验证:会有误报/漏报。源码可解析时走 **AST 精化**(slang_solidity):Phase 14 `TX_ORIGIN_AUTH`(仅鉴权上下文)/`UNCHECKED_LOW_LEVEL_CALL`(结果被消费);Phase 15 函数内数据流(绑定成功布尔在调用后确被 gate 才抑制);Phase 16 `REENTRANCY_EXTERNAL_CALL_BEFORE_STATE_WRITE`(低层外部调用后写**状态变量**、无 `nonReentrant` 守卫;排除写局部、CEI 安全);Phase 17 `ACCESS_MISSING_GUARD_PRIVILEGED_FN`(特权名 + public/external + 有实现 + 非 view/pure + 无修饰符/msg.sender 守卫;结构化修饰符 + 全函数 msg.sender 扫描,跳过接口/抽象声明);Phase 18 `WEAK_BLOCK_RANDOMNESS`(区块源仅在 `% 取模` / `keccak/sha 种子`上下文才报,消除 deadline/记账等合法用途的海量误报);Phase 19 `ECRECOVER_NO_ZERO_CHECK`(恢复地址未与 `address(0)`/`0` 比较才报,消除写得好的签名验证误报);Phase 20 **新增** `DELEGATECALL_ARBITRARY_TARGET`(Critical,AST-only:delegatecall 到形参可控地址 = Parity 级接管);Phase 21 `HARDCODED_GAS_TRANSFER_SEND`(按**实参个数**区分 1 参 ETH send 与 ≥2 参 ERC-20 转账,消除 `dai.transfer(to,amt)` 误报)/`UNSAFE_DOWNCAST_TRUNCATION`(抑制字面量与同族嵌套加宽)。解析失败/panic/深嵌套自动降级回启发式(AST-only 的 `DELEGATECALL_ARBITRARY_TARGET` 解析失败时不检出,但泛化 `DELEGATECALL_USAGE` 仍报)。**仍待后续**:access-control/reentrancy 的特权判定仍基于名字、守卫从宽;reentrancy 任意外部方法调用面 + 跨文件继承状态;跨函数数据流、scope-aware 名字解析(消除同名 shadow / 跨合约同名残留)。
 - 源码检测仅对已验证合约;未验证合约只有字节码级信号 + `unverified` 标记。
