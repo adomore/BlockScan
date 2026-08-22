@@ -153,6 +153,59 @@ impl EtherscanClient {
     }
 }
 
+/// How much of a response body an error message may carry, in bytes.
+///
+/// Large enough that the diagnostic still works — an unexpected envelope is
+/// legible well inside this — and small enough to be a bound.
+const ERROR_BODY_BUDGET: usize = 512;
+
+/// A response body rendered for an error message: clipped to
+/// [`ERROR_BODY_BUDGET`] bytes with the cut stated, and control characters
+/// escaped.
+///
+/// The verbosity is worth keeping. When an explorer returns a shape nothing
+/// expects, the body is the only thing that says what it returned, and an error
+/// that omits it sends someone to reproduce the request by hand. What is not
+/// worth keeping is that the length and the bytes are the explorer's to choose
+/// rather than this tool's: an error tends to reach a log, an unbounded one
+/// fills it, and a body carrying a newline writes a second line into it that a
+/// reader cannot tell from a real one.
+///
+/// The budget applies to what comes *out*, not to what goes in. Escaping
+/// expands — a control byte becomes up to seven characters — so budgeting the
+/// input would leave the message unbounded for exactly the input a hostile
+/// responder would send. Iterating characters also means a multi-byte character
+/// straddling the edge is dropped whole rather than split into invalid UTF-8.
+fn clip_body(text: &str) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(ERROR_BODY_BUDGET + 40);
+    let mut consumed = 0usize;
+    let mut esc = String::new();
+    for c in text.chars() {
+        esc.clear();
+        match c {
+            '\n' => esc.push_str("\\n"),
+            '\r' => esc.push_str("\\r"),
+            '\t' => esc.push_str("\\t"),
+            c if c.is_control() => {
+                let _ = write!(esc, "\\u{{{:x}}}", c as u32);
+            }
+            c => esc.push(c),
+        }
+        if out.len() + esc.len() > ERROR_BODY_BUDGET {
+            break;
+        }
+        out.push_str(&esc);
+        consumed += c.len_utf8();
+    }
+    if consumed < text.len() {
+        // Stated, not implied: without this a reader concludes the explorer
+        // sent exactly these bytes, which is the wrong thing to debug.
+        let _ = write!(out, "…[truncated, {} bytes total]", text.len());
+    }
+    out
+}
+
 /// True if an Etherscan response body indicates a per-second rate limit.
 pub fn is_rate_limited(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
@@ -180,7 +233,9 @@ fn means_absent(message: &str, detail: &str) -> bool {
 /// plain string message — parse into a `Value` first to handle both shapes.
 pub fn parse_source_code(text: &str) -> Result<SourceCodeResult> {
     let env: Envelope<serde_json::Value> = serde_json::from_str(text)
-        .map_err(|e| AppError::Etherscan(format!("getsourcecode parse failed: {e}; body={text}")))?;
+        .map_err(|e| {
+            AppError::Etherscan(format!("getsourcecode parse failed: {e}; body={}", clip_body(text)))
+        })?;
 
     if env.status != "1" {
         let detail = env.result.as_str().unwrap_or(env.message.as_str());
@@ -208,7 +263,12 @@ pub fn parse_source_code(text: &str) -> Result<SourceCodeResult> {
 /// then writes that absence to disk as fact.
 pub fn parse_creation(text: &str) -> Result<Option<CreationResult>> {
     let env: Envelope<serde_json::Value> = serde_json::from_str(text)
-        .map_err(|e| AppError::Etherscan(format!("getcontractcreation parse failed: {e}; body={text}")))?;
+        .map_err(|e| {
+            AppError::Etherscan(format!(
+                "getcontractcreation parse failed: {e}; body={}",
+                clip_body(text)
+            ))
+        })?;
 
     if env.status != "1" {
         let detail = env.result.as_str().unwrap_or_default();
@@ -219,7 +279,10 @@ pub fn parse_creation(text: &str) -> Result<Option<CreationResult>> {
         return Err(AppError::Etherscan(format!("getcontractcreation failed: {shown}")));
     }
     let arr = env.result.as_array().ok_or_else(|| {
-        AppError::Etherscan(format!("getcontractcreation: unexpected result shape; body={text}"))
+        AppError::Etherscan(format!(
+            "getcontractcreation: unexpected result shape; body={}",
+            clip_body(text)
+        ))
     })?;
     match arr.first() {
         Some(v) => Ok(Some(serde_json::from_value(v.clone())?)),
@@ -281,6 +344,93 @@ mod tests {
         let body = r#"{"status":"1","message":"OK","result":[]}"#;
         let err = parse_source_code(body).unwrap_err().to_string();
         assert!(err.contains("no entries"), "{err}");
+    }
+
+// ---- T-17: the response body embedded in a parse error ----
+
+    /// A short body is passed through whole. The verbosity is the point of the
+    /// message; the budget is only a ceiling.
+    #[test]
+    fn a_body_within_budget_is_not_touched() {
+        let body = r#"{"unexpected":"shape"}"#;
+        assert_eq!(clip_body(body), body);
+        assert!(!clip_body(body).contains("truncated"));
+    }
+
+    /// Over budget: clipped, and the clip is stated with the real size, because
+    /// a reader who thinks they are looking at the whole reply debugs the wrong
+    /// thing.
+    #[test]
+    fn an_oversized_body_is_clipped_and_says_so() {
+        let body = "x".repeat(20_000);
+        let out = clip_body(&body);
+        assert!(out.len() < ERROR_BODY_BUDGET + 64, "the result must be bounded: {}", out.len());
+        assert!(out.starts_with(&"x".repeat(ERROR_BODY_BUDGET)));
+        assert!(out.contains("truncated"), "{out}");
+        assert!(out.contains("20000 bytes total"), "{out}");
+    }
+
+    /// The clip walks back to a character boundary. A naive byte slice here
+    /// panics, and a panic inside error construction loses the error.
+    #[test]
+    fn clipping_never_splits_a_character() {
+        // Multi-byte throughout, so the budget lands mid-character.
+        let body = "\u{4e2d}".repeat(1000);
+        let out = clip_body(&body);
+        assert!(out.contains("truncated"));
+        // Valid UTF-8 by construction (String), and no replacement characters.
+        assert!(!out.contains('\u{fffd}'));
+        let kept: String = out.chars().take_while(|c| *c == '\u{4e2d}').collect();
+        assert!(kept.len() <= ERROR_BODY_BUDGET, "kept {} bytes", kept.len());
+        assert!(kept.len() > ERROR_BODY_BUDGET - 3, "should fill the budget: {}", kept.len());
+        assert_eq!(kept.len() % 3, 0, "a 3-byte character was split");
+    }
+
+    /// The length is not the only thing the explorer chooses. A body carrying a
+    /// newline writes a second line into whatever log this reaches, and nothing
+    /// downstream can tell it from a real one.
+    #[test]
+    fn control_characters_do_not_survive_into_the_message() {
+        let out = clip_body("a\nb\r\nc\td\u{1b}[31me\u{0}f");
+        for c in out.chars() {
+            assert!(!c.is_control(), "a control character survived: {out:?}");
+        }
+        assert!(out.contains("a\\nb"), "{out}");
+        assert!(out.contains("c\\td"), "{out}");
+        assert!(out.contains("\\u{1b}"), "{out}");
+    }
+
+    /// The bound has to hold for the input that expands the most. A body of
+    /// control bytes escapes to seven characters each, so budgeting the input
+    /// rather than the output would leave the message unbounded for precisely
+    /// the body somebody would send on purpose.
+    #[test]
+    fn the_bound_holds_for_a_body_that_is_all_escapes() {
+        let out = clip_body(&"\u{1}".repeat(20_000));
+        assert!(
+            out.len() < ERROR_BODY_BUDGET + 64,
+            "escaping blew the budget: {} bytes",
+            out.len()
+        );
+        assert!(out.contains("truncated"));
+    }
+
+    /// The requirement is about the messages, not the helper: every path that
+    /// embeds a body has to be bounded, including the shape error T-05 added.
+    #[test]
+    fn every_error_that_embeds_a_body_is_bounded() {
+        let huge = "y".repeat(50_000);
+        let cases = [
+            parse_source_code(&huge).unwrap_err(),
+            parse_creation(&huge).unwrap_err(),
+            parse_creation(&format!(r#"{{"status":"1","message":"OK","result":"{huge}"}}"#))
+                .unwrap_err(),
+        ];
+        for e in cases {
+            let msg = e.to_string();
+            assert!(msg.len() < 2_048, "unbounded error message: {} bytes", msg.len());
+            assert!(msg.contains("truncated"), "the cut must be visible: {msg}");
+        }
     }
 
     #[test]
