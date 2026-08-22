@@ -56,7 +56,10 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
            │    派生 is_verified/abi;detect_minimal_proxy()(EIP-1167)
            │    analysis::analyze(runtime bytecode) → model::Analysis
            ├ ENRICH
-           │  rpc.resolve_storage_proxy()(无 impl 时回退 EIP-1967/1822)
+           │  rpc.resolve_storage_proxy()（无 impl 时回退）
+           │    四个槽依次：EIP-1967 → beacon → EIP-1822 → zeppelinos 旧槽
+           │  rpc.resolve_diamond()（仍无 impl **且** 字节码含 DELEGATECALL 时）
+           │    facetAddresses() eth_call → 严格解码 address[] → EIP-2535
            │  sourcify.fetch_sources()(仅 !is_verified && cfg.sourcify)
            │  audit::audit_with(details, sources, &suppressions)
            │    → model::Audit(在 source/proxy/sourcify 落定后才审计)
@@ -181,7 +184,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | `src/coingecko.rs` | CoinGecko 发现:`/api/v3/coins/{id}` 的 `platforms` 映射,按当前 chain id 映射 platform key 取合约地址 | `CoinGecko`, `CoinGecko::new/with_base/fetch_addresses(id, chain_id)`, `coingecko_platform`, `parse_platforms`, `encode_id` |
 | `src/chains.rs` | 静态链注册表:chain id → Blockscout v2 base + 短链名(硬编码 1/10/8453/42161/137) | `blockscout_base(u64) -> Option<&'static str>`, `chain_name(u64) -> String` |
 | **网络客户端** | | |
-| `src/rpc.rs` | alloy RootProvider/HTTP 的薄异步封装:链状态、创建发现、代理解析、分块并发事件日志扫描 | `RpcClient`(block_number/block_hash/pinned_at/pinned_block/contract_creations_in_block/trace_creations_in_block/get_code/get_balance/resolve_storage_proxy/logs_addresses/fetch_logs), `ProxyInfo`, `LogHit{block,address,topics,data,tx_hash,log_index}`, `slot_word_to_address`, `parse_trace_creations` |
+| `src/rpc.rs` | alloy RootProvider/HTTP 的薄异步封装:链状态、创建发现、代理解析、分块并发事件日志扫描 | `RpcClient`(block_number/block_hash/pinned_at/pinned_block/contract_creations_in_block/trace_creations_in_block/get_code/get_balance/resolve_storage_proxy/resolve_diamond/diamond_facets/logs_addresses/fetch_logs), `ProxyInfo`, `LogHit{block,address,topics,data,tx_hash,log_index}`, `slot_word_to_address`, `parse_facet_addresses`, `parse_trace_creations` |
 | `src/etherscan.rs` | Etherscan V2 客户端:取已验证源码 + 编译器/代理元数据 + 创建信息,带限流与限流重试 | `EtherscanClient`(get_source_code/get_contract_creation), `SourceCodeResult`, `CreationResult`, `is_rate_limited`, `means_absent`（仅枚举“确无记录”一侧，其余 status!=1 一律为失败） |
 | `src/sourcify.rs` | Sourcify v2 源码回退(Etherscan 无已验证源时):`GET /v2/contract/{chainId}/{address}?fields=sources` | `Sourcify`(new/fetch_sources), `parse_sourcify_sources(&Value) -> Vec<SourceFile>` |
 | `src/enrich.rs` | 经免费 Blockscout v2 的 best-effort 富化 + 发现:name tag、project URL、USD top 持仓(`--table`)、按 name/tag 搜合约 | `Blockscout`(fetch/search_contracts), `Enrichment{name_tag,project_url,holdings}`, `parse_search/parse_holdings/fmt_usd` |
@@ -261,6 +264,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | 审计 初始化器精度 | `PROXY_UNPROTECTED_INITIALIZER` 语料 **17 → 1**:接口声明(16 条中的绝大多数——`initializer_guarded` 从不在 `;` 处停止,扫过声明撞上下一个函数的 `{` 即判无守卫)、`internal pure` 库函数、以及 `require(msg.sender == factory)` 这类非 OZ 修饰符守卫,三类误报全部消除。判据对齐 Phase 17:可外部调用 + 能写状态 + 无守卫 | AUDIT_DESIGN Phase 29 ✅ |
 | 审计 常量操作数精度 | 编译期常量不再触发运行时规则:`WEAK_BLOCK_RANDOMNESS` **13 → 0**(`uint32(block.timestamp % 2**32)` 是 UniswapV2 TWAP 的位掩码,非取随机)、`UNSAFE_DOWNCAST_TRUNCATION` **138 → 107**(`uint112(-1)` 是 0.8 前的 `type().max`;既有字面量豁免只认裸数字节点)。取模边界判据经审查改为**结构化**——必须是实参自身的顶层 `%`,否则 `uint32(a + b % 2**32)` 这类会静默漏报 | AUDIT_DESIGN Phase 30 ✅ |
 | 审计 窗口启发式作用域 | `CHAINLINK_LATESTROUNDDATA_NO_STALENESS_CHECK` 与 `PROXY_UNPROTECTED_INITIALIZER` 从固定行数看前改为 `scan_functions` 的**函数体**作用域。新鲜度判据从“附近有 require”改为“该调用解构出的**非价格槽**名字是否参与比较”，于是 `(, int p, , ,) = feed.latestRoundData()` 因**未绑定任何新鲜度变量**而必然未校验；`initializer_has_body` 整个删除（作用域自身就排掉无体声明）。语料 172 发现 / 773 出现**逐行不变**，Phase 29 的 17 → 1 保持 | AUDIT_DESIGN T-06 ✅ |
+| 代理家族补齐 | 新增**标准前 zeppelinos 槽**（`keccak256("org.zeppelinos.proxy.implementation")`，无 EIP-1967 的“减一”推导）与 **EIP-2535 钻石**（无实现槽，只能问：`facetAddresses()` loupe 调用）。钻石探测每合约多一次 `eth_call`，故以**字节码是否含 DELEGATECALL** 为闸（复用已有的操作码扫描，零成本）；返回值严格解码（头偏移、长度与载荷一致、每词高 12 字节为零），因为被问的合约本就不知是否钻石、带 fallback 的合约会回答**某个东西** | TASKS T-07 ✅ |
 | SARIF 输出 | SARIF 2.1.0 + `partialFingerprints`(GitHub Code Scanning 基线/去重) | AUDIT_DESIGN Phase 10 ✅ |
 | 审计抑制 | `--suppress` JSON 配置(rule/contract/swc/category/fingerprint 匹配,评分前剔除,fail-safe) | AUDIT_DESIGN Phase 12 ✅ |
 | 防御监控 `monitor` | 区间 `eth_getLogs` 解码安全事件(代理升级/所有权/管理员,`--alert-topic` 扩展)→ `Alert` 落 alerts.jsonl/webhook/stdout · `--watchlist` 限定 | MONITOR_DESIGN 批量3 ✅ |

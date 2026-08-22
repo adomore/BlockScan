@@ -133,8 +133,20 @@ pub struct ContractDetails {
     pub constructor_arguments: Option<String>,
     pub is_proxy: bool,
     pub implementation: Option<String>,
-    /// How the proxy was detected: `etherscan` / `EIP-1167` / `EIP-1967` /
-    /// `EIP-1967-beacon` / `EIP-1822`. `None` when not a proxy.
+    /// How the proxy was detected. Closed set:
+    /// - `etherscan` — the explorer flagged it
+    /// - `EIP-1167` — minimal-proxy clone, matched in the runtime bytecode
+    /// - `EIP-1967` — the standard implementation slot
+    /// - `EIP-1967-beacon` — the standard beacon slot, dereferenced through the
+    ///   beacon's `implementation()`
+    /// - `EIP-1822` — legacy UUPS proxiable slot
+    /// - `zeppelinos-legacy` — the pre-standard OpenZeppelin slot, which
+    ///   predates EIP-1967 and its "minus one" derivation
+    /// - `EIP-2535` — multi-facet diamond, enumerated via the loupe's
+    ///   `facetAddresses()`; `implementation` then holds the *first* facet,
+    ///   because a diamond has no single one
+    ///
+    /// `None` when not a proxy.
     pub proxy_kind: Option<String>,
     /// Where the verified source came from: `etherscan` / `sourcify` / `None`.
     pub verified_via: Option<String>,

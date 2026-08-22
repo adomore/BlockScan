@@ -533,6 +533,77 @@ fn addresses_cli(rpc: &str, es: &str, out: &str, overwrite: bool) -> Cli {
 }
 
 // ---------------------------------------------------------------------------
+// T-07 — the diamond family, and the gate on probing for it
+// ---------------------------------------------------------------------------
+
+/// An ABI `address[]` return body, hex-encoded, as a diamond's
+/// `facetAddresses()` answers.
+fn loupe_reply(facets: &[&str]) -> String {
+    let mut hex = String::from("0x");
+    let mut word = |v: &str| {
+        hex.push_str(&"0".repeat(64 - v.len()));
+        hex.push_str(v);
+    };
+    word("20"); // head: offset to the array data
+    word(&format!("{:x}", facets.len()));
+    for f in facets {
+        word(f.trim_start_matches("0x"));
+    }
+    hex
+}
+
+const FACET: &str = "0x00000000000000000000000000000000000000f1";
+
+/// A diamond keeps no implementation slot; the only way to recognise one is to
+/// call the loupe. `0xf4` is DELEGATECALL — every diamond delegates.
+#[tokio::test]
+async fn a_diamond_is_detected_through_the_loupe() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    mount_rpc_full(&rpc, "0xf4").await;
+    mount_rpc_method(&rpc, "eth_call", json!(loupe_reply(&[FACET]))).await;
+    mount_etherscan_unverified(&es).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    run(
+        addresses_cli(&rpc.uri(), &es.uri(), tmp.path().to_str().unwrap(), false),
+        std::future::ready(()),
+    )
+    .await
+    .unwrap();
+
+    let v: Value = serde_json::from_str(&read_metadata(tmp.path())).unwrap();
+    assert_eq!(v["proxy_kind"], json!("EIP-2535"));
+    assert_eq!(v["is_proxy"], json!(true));
+    assert_eq!(v["implementation"], json!(FACET), "the first facet the loupe named");
+}
+
+/// The probe costs an extra eth_call on every contract that is not already a
+/// known proxy, so it is gated on the bytecode delegating at all. This answers
+/// the loupe anyway: a scan that ignores the answer is one that never asked.
+#[tokio::test]
+async fn a_contract_that_never_delegates_is_not_probed() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    mount_rpc_full(&rpc, "0x6080604052").await; // no 0xf4 anywhere
+    mount_rpc_method(&rpc, "eth_call", json!(loupe_reply(&[FACET]))).await;
+    mount_etherscan_unverified(&es).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    run(
+        addresses_cli(&rpc.uri(), &es.uri(), tmp.path().to_str().unwrap(), false),
+        std::future::ready(()),
+    )
+    .await
+    .unwrap();
+
+    let raw = read_metadata(tmp.path());
+    let v: Value = serde_json::from_str(&raw).unwrap();
+    assert!(v["proxy_kind"].is_null(), "not a proxy, and not asked: {raw}");
+    assert_eq!(v["is_proxy"], json!(false));
+}
+
+// ---------------------------------------------------------------------------
 // T-04 — every state read answers from one block
 // ---------------------------------------------------------------------------
 

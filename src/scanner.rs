@@ -270,9 +270,21 @@ impl Scanner {
         built.details.block_hash = self.block_hash.clone();
         built.details.incomplete = incomplete;
 
-        // Storage-slot proxy fallback (EIP-1967/1822) when no implementation yet.
+        // Storage-slot proxy fallback (EIP-1967/1822/zeppelinos) when no
+        // implementation yet.
         if built.details.implementation.is_none() {
             if let Ok(Some(p)) = self.rpc.resolve_storage_proxy(addr).await {
+                built.details.is_proxy = true;
+                built.details.implementation = Some(format!("{:#x}", p.target));
+                built.details.proxy_kind = Some(p.kind.to_string());
+            }
+        }
+        // A diamond keeps no implementation slot, so it has to be asked — an
+        // extra eth_call per contract. Only worth asking one that delegates at
+        // all: every diamond does, most contracts do not, and the opcode scan
+        // that answers it has already run.
+        if built.details.implementation.is_none() && delegates(&built.details) {
+            if let Some(p) = self.rpc.resolve_diamond(addr).await {
                 built.details.is_proxy = true;
                 built.details.implementation = Some(format!("{:#x}", p.target));
                 built.details.proxy_kind = Some(p.kind.to_string());
@@ -445,6 +457,13 @@ pub fn fold_outcomes(results: Vec<SaveOutcome>) -> RunStats {
         }
     }
     stats
+}
+
+/// Whether the runtime bytecode contains a reachable `DELEGATECALL`, read off
+/// the opcode scan `build_details` already ran. The gate on the diamond probe:
+/// a contract that never delegates cannot be a proxy of any kind.
+fn delegates(d: &ContractDetails) -> bool {
+    d.analysis.opcodes.iter().any(|o| o == "DELEGATECALL")
 }
 
 /// Detect an EIP-1167 minimal proxy from runtime bytecode and return the
