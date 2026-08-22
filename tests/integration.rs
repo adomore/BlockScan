@@ -671,6 +671,31 @@ async fn two_scans_at_the_same_pin_produce_identical_metadata() {
     );
 }
 
+/// An explicit `--at-block` the node cannot resolve stops the scan. The user
+/// named a block; quietly scanning a different one is worse than not scanning.
+#[tokio::test]
+async fn an_unresolvable_at_block_stops_the_scan() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    mount_rpc_method(&rpc, "eth_blockNumber", json!("0x64")).await;
+    mount_rpc_method(&rpc, "eth_getBlockByNumber", Value::Null).await;
+    mount_etherscan_ok(&es).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let err = run(
+        pinned_cli(&rpc.uri(), &es.uri(), tmp.path().to_str().unwrap(), Some("999999999")),
+        std::future::ready(()),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("999999999"), "{err}");
+    assert!(
+        !tmp.path().join(USDC.to_lowercase()).exists(),
+        "nothing may be written from a pin that was never established"
+    );
+}
+
 /// Without `--at-block` the head is resolved once, at scan start. The mock hands
 /// out a new head on every `eth_blockNumber`, so a second resolution anywhere in
 /// the run would show up as a different recorded block.
