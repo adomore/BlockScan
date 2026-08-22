@@ -339,6 +339,7 @@ In machine modes **stdout is data only** (pipe to `jq`); `monitor`/`watch` stdou
 | `--no-audit` | false | Disable the security audit |
 | `--min-risk <0–100>` / `--only-vulnerable` | — | Audit filters |
 | `--suppress <file>` | — | Audit suppression config |
+| `audit --import <file>` | — | Merge another analyser's results (SARIF / Slither JSON), repeatable; excluded from scoring |
 | `--manifest <file>` | — | By extension: `.json`/`.csv` summary (+clusters.json), `.md`/`.html` report document, `.pdf` refused |
 | `--format human\|json\|ndjson\|sarif` | human | Output format |
 | `-v` / `-vv` | — | Increase log verbosity (stderr) |

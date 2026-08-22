@@ -150,6 +150,7 @@ mod tests {
 
     fn finding() -> SecurityFinding {
         SecurityFinding {
+            source: crate::model::NATIVE_SOURCE.into(),
             rule_id: "DELEGATECALL_USAGE".into(),
             title: "delegatecall".into(),
             category: "SC06:Unchecked External Calls".into(),

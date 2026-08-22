@@ -15,6 +15,7 @@ pub mod etherscan;
 pub mod events;
 pub mod export;
 pub mod github;
+pub mod import;
 pub mod group;
 pub mod mcp;
 pub mod model;
@@ -585,7 +586,34 @@ pub fn audit_corpus(
 
 pub fn run_audit(g: &GlobalArgs, args: &AuditArgs) -> error::Result<()> {
     let supp = suppress::Suppressions::load_or_warn(g.suppress.as_deref());
-    let contracts = audit_corpus(&g.out, g.min_risk, g.only_vulnerable, args.by_risk, &supp);
+    let mut contracts = audit_corpus(&g.out, g.min_risk, g.only_vulnerable, args.by_risk, &supp);
+
+    // Imports land *after* scoring and filtering, so a foreign finding can
+    // neither move a risk number nor pull a contract past --min-risk. What it
+    // could not place is said out loud rather than dropped.
+    if !args.import.is_empty() {
+        let sources = storage::corpus_source_paths(&g.out);
+        for path in &args.import {
+            let s = import::merge(&mut contracts, &sources, import::load(path)?);
+            tracing::info!(
+                "imported {}/{} finding(s) from {} ({}); {} ambiguous, {} unmatched",
+                s.attributed,
+                s.total,
+                path.display(),
+                s.tool,
+                s.ambiguous,
+                s.unmatched
+            );
+            if s.ambiguous + s.unmatched > 0 {
+                tracing::warn!(
+                    "{} finding(s) from {} could not be attributed to a contract in this corpus",
+                    s.ambiguous + s.unmatched,
+                    s.tool
+                );
+            }
+        }
+    }
+    let contracts = contracts;
 
     let vulnerable = contracts
         .iter()
@@ -1541,15 +1569,15 @@ mod tests {
         // Exercise run_audit's output/sort/filter branches in-process (the binary
         // integration test runs it in a subprocess, which llvm-cov can't see here).
         g.format = OutputFormat::Json;
-        run_audit(&g, &AuditArgs { by_risk: true }).unwrap();
+        run_audit(&g, &AuditArgs { by_risk: true, import: Vec::new() }).unwrap();
         g.format = OutputFormat::Ndjson;
-        run_audit(&g, &AuditArgs { by_risk: false }).unwrap();
+        run_audit(&g, &AuditArgs { by_risk: false, import: Vec::new() }).unwrap();
         g.format = OutputFormat::Human;
         g.only_vulnerable = true; // keeps only the tx.origin contract
-        run_audit(&g, &AuditArgs { by_risk: false }).unwrap();
+        run_audit(&g, &AuditArgs { by_risk: false, import: Vec::new() }).unwrap();
         g.only_vulnerable = false;
         g.min_risk = 101; // clamped to 100; drops everything without panicking
-        run_audit(&g, &AuditArgs { by_risk: false }).unwrap();
+        run_audit(&g, &AuditArgs { by_risk: false, import: Vec::new() }).unwrap();
     }
 
     #[tokio::test]
@@ -1740,6 +1768,82 @@ mod tests {
         assert!(tmp.path().join("clusters.json").exists());
     }
 
+    /// T-12 end to end: a Slither file on disk, through the CLI path, into the
+    /// document — attributed, tallied apart, and not touching the grade.
+    #[test]
+    fn audit_merges_an_import_without_moving_the_score() {
+        let tmp = tempfile::tempdir().unwrap();
+        let addr = "0x00000000000000000000000000000000000000ff";
+        let dir = tmp.path().join(addr);
+        std::fs::create_dir_all(dir.join("source/src")).unwrap();
+        std::fs::write(
+            dir.join("source/src/Vault.sol"),
+            "pragma solidity ^0.8.0;\ncontract V { function f() public { require(tx.origin == owner); } }",
+        )
+        .unwrap();
+        let mut d = crate::model::ContractDetails::minimal(addr, 1);
+        d.contract_name = Some("Vault".into());
+        d.is_verified = true;
+        std::fs::write(dir.join("metadata.json"), serde_json::to_string(&d).unwrap()).unwrap();
+
+        let imp = tmp.path().join("slither.json");
+        std::fs::write(
+            &imp,
+            serde_json::json!({
+                "success": true,
+                "results": { "detectors": [{
+                    "check": "reentrancy-eth", "impact": "High", "confidence": "Medium",
+                    "description": "Reentrancy in V.f()",
+                    "elements": [{ "source_mapping": {
+                        "filename_relative": "src/Vault.sol", "lines": [2]
+                    }}]
+                }]}
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // The grade the corpus produces on its own.
+        let before = audit_corpus(
+            tmp.path(),
+            0,
+            false,
+            false,
+            &suppress::Suppressions::default(),
+        );
+        let native_score = before[0].audit.as_ref().unwrap().risk_score;
+        assert!(native_score > 0, "the fixture must actually score something");
+
+        let out = tmp.path().join("report.md");
+        let mut g = cli(&["blockscan", "-o", tmp.path().to_str().unwrap(), "audit"]).global;
+        g.manifest = Some(out.clone());
+        run_audit(
+            &g,
+            &crate::cli::AuditArgs { by_risk: false, import: vec![imp] },
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert!(body.contains("slither:reentrancy-eth"), "the import is in the document");
+        assert!(body.contains("| Severity | blockscan | imported |"), "{body}");
+        assert!(
+            body.contains(&format!("grade {}", grade_of(native_score))),
+            "the grade must be the one the native findings alone produce: {body}"
+        );
+    }
+
+    /// Mirror of audit.rs's own banding, so this test does not depend on a
+    /// private function.
+    fn grade_of(score: u8) -> &'static str {
+        match score {
+            0..=9 => "A",
+            10..=24 => "B",
+            25..=44 => "C",
+            45..=69 => "D",
+            _ => "F",
+        }
+    }
+
     /// T-14: `audit --manifest report.md` has to produce the document
     /// end-to-end, over the filtered set this subcommand builds rather than the
     /// whole corpus. Dispatch and rendering are tested in export.rs; what this
@@ -1765,7 +1869,7 @@ mod tests {
             let out = tmp.path().join(name);
             let mut g = cli(&["blockscan", "-o", tmp.path().to_str().unwrap(), "audit"]).global;
             g.manifest = Some(out.clone());
-            run_audit(&g, &crate::cli::AuditArgs { by_risk: false }).unwrap();
+            run_audit(&g, &crate::cli::AuditArgs { by_risk: false, import: Vec::new() }).unwrap();
             let body = std::fs::read_to_string(&out).unwrap();
             assert!(body.starts_with(opener), "{name}: {}", &body[..40.min(body.len())]);
             assert!(body.contains("Sample"), "{name} must describe the contract");
@@ -1775,7 +1879,7 @@ mod tests {
         let pdf = tmp.path().join("report.pdf");
         let mut g = cli(&["blockscan", "-o", tmp.path().to_str().unwrap(), "audit"]).global;
         g.manifest = Some(pdf.clone());
-        assert!(run_audit(&g, &crate::cli::AuditArgs { by_risk: false }).is_err());
+        assert!(run_audit(&g, &crate::cli::AuditArgs { by_risk: false, import: Vec::new() }).is_err());
         assert!(!pdf.exists());
     }
 

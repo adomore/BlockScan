@@ -22,12 +22,31 @@ pub struct Analysis {
     pub interfaces: Vec<String>,
 }
 
+/// `SecurityFinding::source` for blockscan's own detectors.
+pub const NATIVE_SOURCE: &str = "blockscan";
+
+/// serde default for [`SecurityFinding::source`].
+fn native_source() -> String {
+    NATIVE_SOURCE.to_string()
+}
+
 /// A standardized security finding (SecurityFinding v2). Three-layer taxonomy:
 /// `category` (OWASP SC Top 10) → `swc` (SWC registry, SCWE's predecessor) →
 /// `rule_id` (internal). Carries grading, damage assessment and remediation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecurityFinding {
-    /// L3 internal rule id, e.g. `TX_ORIGIN_AUTH`.
+    /// Which analyser produced this finding: [`NATIVE_SOURCE`] for blockscan's
+    /// own detectors, or the imported tool's name (`slither`, `mythril`, ...).
+    ///
+    /// `#[serde(default)]` reads a `metadata.json` written before imports
+    /// existed as native, which it was — there was nothing else it could be.
+    /// The scoring path filters on this, so an imported finding cannot move a
+    /// risk number no matter where it is merged in.
+    #[serde(default = "native_source")]
+    pub source: String,
+    /// L3 internal rule id, e.g. `TX_ORIGIN_AUTH`. Imported ids are namespaced
+    /// by their tool (`slither:reentrancy-eth`) so they can never collide with
+    /// a rule in the `RuleSpec` table.
     pub rule_id: String,
     pub title: String,
     /// L1 OWASP Smart Contract Top 10 class, e.g. `SC01:Access Control`.

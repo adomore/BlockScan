@@ -302,6 +302,15 @@ pub struct AuditArgs {
     /// Sort the report by risk score (descending) instead of address order.
     #[arg(long, default_value_t = false)]
     pub by_risk: bool,
+
+    /// Merge findings from another analyser's output file (SARIF 2.1.0 or
+    /// Slither JSON), attributed to the contracts they belong to. Repeatable.
+    ///
+    /// The file is read, never executed: run your own analyser, pass what it
+    /// wrote. Imported findings are excluded from blockscan's risk score and
+    /// reported under their own tool name.
+    #[arg(long = "import", value_name = "FILE")]
+    pub import: Vec<PathBuf>,
 }
 
 #[derive(Args, Debug, Clone)]

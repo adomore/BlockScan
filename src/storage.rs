@@ -77,6 +77,39 @@ pub fn load_sources(out: &Path, address: &str) -> Vec<SourceFile> {
 /// recomputing the path from `out` + address. Used by the offline `audit`
 /// subcommand so it reads a contract's source from its *actual* on-disk directory
 /// (e.g. the per-chain `out/<chainname>/<addr>/` subdir), not the flat layout.
+/// Every contract's source paths, keyed by lowercased address, relative to that
+/// contract's own `source/` root — the same form findings use for locations.
+///
+/// Paths only: attribution needs to know which contract owns `src/Vault.sol`,
+/// not what is in it, and reading a whole corpus to answer that would be a
+/// large read for a string comparison.
+pub fn corpus_source_paths(out: &Path) -> std::collections::BTreeMap<String, Vec<String>> {
+    load_all_metadata_with_dirs(out)
+        .into_iter()
+        .map(|(dir, d)| {
+            let root = dir.join("source");
+            let mut paths = Vec::new();
+            collect_source_paths(&root, &root, &mut paths);
+            paths.sort();
+            (d.address.to_ascii_lowercase(), paths)
+        })
+        .collect()
+}
+
+fn collect_source_paths(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_source_paths(root, &path, out);
+        } else if let Ok(rel) = path.strip_prefix(root) {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+}
+
 pub fn load_sources_from_dir(contract_dir: &Path) -> Vec<SourceFile> {
     let root = contract_dir.join("source");
     let mut files = Vec::new();

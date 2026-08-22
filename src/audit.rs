@@ -622,6 +622,7 @@ fn build_finding(
     }
     references.push(OWASP_URL.to_string());
     SecurityFinding {
+        source: crate::model::NATIVE_SOURCE.to_string(),
         rule_id: rule_id.to_string(),
         title: s.title.to_string(),
         category: s.category.to_string(),
@@ -1447,9 +1448,14 @@ fn priority(severity: &str) -> &'static str {
 /// Overall contract risk: take the max per-finding risk per *weakness key*
 /// (`swc`, else `category`, so source+bytecode of the same weakness count once),
 /// then probabilistically OR the distinct weaknesses together (capped 100).
+///
+/// Native findings only. An imported finding carries another tool's judgement
+/// and no `risk` of ours, so letting one into this sum would move a number that
+/// is supposed to mean "what blockscan found". The filter is here rather than at
+/// the call site so the property holds wherever a merged corpus gets rescored.
 fn overall_risk(findings: &[SecurityFinding]) -> u8 {
     let mut by_key: BTreeMap<String, u8> = BTreeMap::new();
-    for f in findings {
+    for f in findings.iter().filter(|f| f.source == crate::model::NATIVE_SOURCE) {
         let key = f.swc.clone().unwrap_or_else(|| f.category.clone());
         let e = by_key.entry(key).or_insert(0);
         if f.risk > *e {
@@ -1483,9 +1489,12 @@ fn risk_level(score: u8) -> &'static str {
     }
 }
 
+/// Native findings only, for the same reason as [`overall_risk`]: this summary
+/// is what the grade is explained by, and mixing another tool's counts into it
+/// would make the explanation not match the number.
 fn summarize(findings: &[SecurityFinding]) -> AuditSummary {
     let mut s = AuditSummary::default();
-    for f in findings {
+    for f in findings.iter().filter(|f| f.source == crate::model::NATIVE_SOURCE) {
         *s.by_severity.entry(f.severity.clone()).or_insert(0) += 1;
         *s.by_category.entry(f.category.clone()).or_insert(0) += 1;
         *s.by_confidence.entry(f.confidence.clone()).or_insert(0) += 1;

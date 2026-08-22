@@ -121,6 +121,12 @@ struct Overview {
     audited: usize,
     with_findings: usize,
     by_severity: BTreeMap<&'static str, usize>,
+    /// The same tally over imported findings, kept apart from the native one.
+    /// Merging them would make the table disagree with the grade beside it,
+    /// which is computed from native findings alone.
+    imported_by_severity: BTreeMap<&'static str, usize>,
+    /// Tools whose findings appear in this document, in name order.
+    tools: std::collections::BTreeSet<String>,
     by_grade: BTreeMap<String, usize>,
     /// The block every record was read at, when they agree on one. `None` means
     /// the records disagree or predate the pin, and the document says so rather
@@ -132,20 +138,31 @@ struct Overview {
 
 fn overview(contracts: &[ContractDetails]) -> Overview {
     let mut by_severity: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut imported_by_severity: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut by_grade: BTreeMap<String, usize> = BTreeMap::new();
+    let mut tools: std::collections::BTreeSet<String> = Default::default();
     for sev in SEVERITY_ORDER {
         by_severity.insert(sev, 0);
+        imported_by_severity.insert(sev, 0);
     }
     for d in contracts {
         if let Some(a) = &d.audit {
             *by_grade.entry(a.grade.clone()).or_default() += 1;
             for f in &a.findings {
+                if f.source != crate::model::NATIVE_SOURCE {
+                    tools.insert(f.source.clone());
+                }
                 if let Some(sev) = SEVERITY_ORDER.iter().find(|s| s.eq_ignore_ascii_case(&f.severity))
                 {
                     // Occurrences, not findings: one finding covers every site
                     // it lists, and a report that counts findings understates
                     // how much code is affected.
-                    *by_severity.entry(*sev).or_default() += f.locations.len().max(1);
+                    let n = f.locations.len().max(1);
+                    if f.source == crate::model::NATIVE_SOURCE {
+                        *by_severity.entry(*sev).or_default() += n;
+                    } else {
+                        *imported_by_severity.entry(*sev).or_default() += n;
+                    }
                 }
             }
         }
@@ -168,6 +185,8 @@ fn overview(contracts: &[ContractDetails]) -> Overview {
             .filter(|d| d.audit.as_ref().is_some_and(|a| !a.findings.is_empty()))
             .count(),
         by_severity,
+        imported_by_severity,
+        tools,
         by_grade,
         pinned,
         incomplete: contracts.iter().filter(|d| !d.incomplete.is_empty()).count(),
@@ -282,9 +301,29 @@ pub fn render_markdown(contracts: &[ContractDetails]) -> String {
 
     m.push_str("## Findings by severity\n\n");
     m.push_str("Occurrences, not findings: one finding covers every site it lists.\n\n");
-    m.push_str("| Severity | Occurrences |\n|---|---:|\n");
-    for sev in SEVERITY_ORDER {
-        m.push_str(&format!("| {sev} | {} |\n", o.by_severity.get(sev).copied().unwrap_or(0)));
+    if o.tools.is_empty() {
+        m.push_str("| Severity | Occurrences |\n|---|---:|\n");
+        for sev in SEVERITY_ORDER {
+            m.push_str(&format!("| {sev} | {} |\n", o.by_severity.get(sev).copied().unwrap_or(0)));
+        }
+    } else {
+        // Two columns, never one total. The grade beside each contract is
+        // computed from blockscan's findings alone, so a merged number would
+        // not be the number the grade explains.
+        let imported: Vec<String> = o.tools.iter().map(|t| md_cell(t)).collect();
+        m.push_str(&format!(
+            "Imported findings are counted separately and are excluded from every risk score \
+             and grade in this document. Imported from: {}.\n\n",
+            imported.join(", ")
+        ));
+        m.push_str("| Severity | blockscan | imported |\n|---|---:|---:|\n");
+        for sev in SEVERITY_ORDER {
+            m.push_str(&format!(
+                "| {sev} | {} | {} |\n",
+                o.by_severity.get(sev).copied().unwrap_or(0),
+                o.imported_by_severity.get(sev).copied().unwrap_or(0)
+            ));
+        }
     }
     if !o.by_grade.is_empty() {
         m.push_str("\n| Grade | Contracts |\n|---|---:|\n");
@@ -353,8 +392,13 @@ pub fn render_markdown(contracts: &[ContractDetails]) -> String {
                     let mut tags = vec![f.rule_id.clone(), f.category.clone()];
                     tags.extend(f.swc.clone());
                     tags.extend(f.scwe.clone());
+                    let via = if f.source == crate::model::NATIVE_SOURCE {
+                        String::new()
+                    } else {
+                        format!(" (imported from {})", md_cell(&f.source))
+                    };
                     m.push_str(&format!(
-                        "#### [{}] {}\n\n",
+                        "#### [{}] {}{via}\n\n",
                         md_cell(&f.severity),
                         md_cell(&f.title)
                     ));
@@ -463,12 +507,33 @@ pub fn render_html(contracts: &[ContractDetails]) -> String {
 
     h.push_str("<h2>Findings by severity</h2>\n");
     h.push_str("<p class=\"mut\">Occurrences, not findings: one finding covers every site it lists.</p>\n");
-    h.push_str("<div class=\"wrap\"><table>\n<tr><th>Severity</th><th>Occurrences</th></tr>\n");
-    for sev in SEVERITY_ORDER {
+    if o.tools.is_empty() {
+        h.push_str("<div class=\"wrap\"><table>\n<tr><th>Severity</th><th>Occurrences</th></tr>\n");
+        for sev in SEVERITY_ORDER {
+            h.push_str(&format!(
+                "<tr><td><span class=\"chip {sev}\">{sev}</span></td><td class=\"n\">{}</td></tr>\n",
+                o.by_severity.get(sev).copied().unwrap_or(0)
+            ));
+        }
+    } else {
+        let tools: Vec<String> = o.tools.iter().map(|t| html_escape(t)).collect();
         h.push_str(&format!(
-            "<tr><td><span class=\"chip {sev}\">{sev}</span></td><td class=\"n\">{}</td></tr>\n",
-            o.by_severity.get(sev).copied().unwrap_or(0)
+            "<p class=\"mut\">Imported findings are counted separately and are excluded from every \
+             risk score and grade in this document. Imported from: {}.</p>\n",
+            tools.join(", ")
         ));
+        h.push_str(
+            "<div class=\"wrap\"><table>\n<tr><th>Severity</th><th>blockscan</th>\
+             <th>imported</th></tr>\n",
+        );
+        for sev in SEVERITY_ORDER {
+            h.push_str(&format!(
+                "<tr><td><span class=\"chip {sev}\">{sev}</span></td>\
+                 <td class=\"n\">{}</td><td class=\"n\">{}</td></tr>\n",
+                o.by_severity.get(sev).copied().unwrap_or(0),
+                o.imported_by_severity.get(sev).copied().unwrap_or(0)
+            ));
+        }
     }
     h.push_str("</table></div>\n");
     if !o.by_grade.is_empty() {
@@ -538,8 +603,16 @@ pub fn render_html(contracts: &[ContractDetails]) -> String {
             Some(a) => {
                 for f in ordered_findings(a) {
                     h.push_str("<div class=\"card\">\n");
+                    let via = if f.source == crate::model::NATIVE_SOURCE {
+                        String::new()
+                    } else {
+                        format!(
+                            " <span class=\"mut\">(imported from {})</span>",
+                            html_escape(&f.source)
+                        )
+                    };
                     h.push_str(&format!(
-                        "<h4><span class=\"chip {}\">{}</span> {}</h4>\n",
+                        "<h4><span class=\"chip {}\">{}</span> {}{via}</h4>\n",
                         html_escape(&f.severity),
                         html_escape(&f.severity),
                         html_escape(&f.title)
@@ -655,6 +728,7 @@ mod tests {
                 grade: "C".into(),
                 risk_level: "Medium".into(),
                 findings: vec![crate::model::SecurityFinding {
+                    source: crate::model::NATIVE_SOURCE.into(),
                     rule_id: "TX_ORIGIN_AUTH".into(),
                     title: "t".into(),
                     category: "SC01:Access Control".into(),
@@ -742,6 +816,7 @@ mod tests {
         d.compiler_version = Some("v0.8.20 | \"quoted\" & <b>".into());
         d.incomplete = vec!["creation".into()];
         let mut f = crate::model::SecurityFinding {
+            source: crate::model::NATIVE_SOURCE.into(),
             rule_id: "TX_ORIGIN_AUTH".into(),
             title: "tx.origin used for authorization".into(),
             category: "SC01:Access Control".into(),
@@ -909,6 +984,41 @@ mod tests {
             assert!(md.contains(fact), "markdown is missing {fact}");
             assert!(html.contains(fact), "html is missing {fact}");
         }
+    }
+
+    /// T-12: a document that showed one merged number would be showing a number
+    /// no grade in it explains, because grades are computed from native
+    /// findings alone.
+    #[test]
+    fn imported_findings_are_tallied_in_their_own_column() {
+        let mut d = hostile();
+        let mut foreign = d.audit.as_ref().unwrap().findings[0].clone();
+        foreign.source = "slither".into();
+        foreign.rule_id = "slither:reentrancy-eth".into();
+        foreign.title = "Reentrancy in Vault.withdraw()".into();
+        foreign.locations = vec!["src/Vault.sol:17".into()];
+        d.audit.as_mut().unwrap().findings.push(foreign);
+
+        let md = render_markdown(&[d.clone()]);
+        assert!(md.contains("| Severity | blockscan | imported |"), "{md}");
+        // The native finding lists two locations, the imported one lists one.
+        assert!(md.contains("| High | 2 | 1 |"), "{md}");
+        assert!(md.contains("Imported from: slither"), "{md}");
+        assert!(md.contains("excluded from every risk score"), "{md}");
+        assert!(md.contains("(imported from slither)"), "the finding says whose it is");
+
+        let html = render_html(&[d]);
+        assert!(html.contains("<th>blockscan</th>"), "{html}");
+        assert!(html.contains("imported from slither"));
+    }
+
+    /// With no imports the document keeps the single column it had, rather than
+    /// carrying an "imported: 0" that means nothing.
+    #[test]
+    fn a_native_only_document_keeps_one_column() {
+        let md = render_markdown(&[hostile()]);
+        assert!(md.contains("| Severity | Occurrences |"), "{md}");
+        assert!(!md.contains("imported"), "{md}");
     }
 
     /// The severity table counts sites, not findings — one finding here lists

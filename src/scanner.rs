@@ -733,6 +733,7 @@ mod tests {
         use crate::model::{Audit, SecurityFinding};
         fn finding(sev: &str) -> SecurityFinding {
             SecurityFinding {
+                source: crate::model::NATIVE_SOURCE.into(),
                 rule_id: "X".into(), title: "t".into(), category: "SC01:Access Control".into(),
                 swc: None, scwe: None, ethtrust: None, severity: sev.into(), confidence: "Medium".into(),
                 impact_score: 5, likelihood_score: 5, exploitability: "Moderate".into(),

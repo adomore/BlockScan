@@ -216,6 +216,7 @@ mod tests {
                 grade: "D".into(),
                 risk_level: "Medium".into(),
                 findings: vec![crate::model::SecurityFinding {
+                    source: crate::model::NATIVE_SOURCE.into(),
                     rule_id: "TX_ORIGIN_AUTH".into(),
                     title: "Use of tx.origin".into(),
                     category: "SC01:Access Control".into(),

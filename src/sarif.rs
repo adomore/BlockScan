@@ -18,7 +18,11 @@ pub fn build_sarif(contracts: &[ContractDetails]) -> Value {
 
     for c in contracts {
         let Some(audit) = &c.audit else { continue };
-        for f in &audit.findings {
+        // Native findings only. This run declares `tool.driver.name: blockscan`,
+        // so putting an imported finding in it would be blockscan claiming
+        // another analyser's result as its own — and a consumer deduplicating
+        // against that analyser's own SARIF would then see it twice.
+        for f in audit.findings.iter().filter(|f| f.source == crate::model::NATIVE_SOURCE) {
             if !rule_idx.contains_key(&f.rule_id) {
                 rule_idx.insert(f.rule_id.clone(), rules.len());
                 rules.push(rule_object(f));
@@ -163,6 +167,7 @@ mod tests {
 
     fn finding(rule: &str, sev: &str, risk: u8, locs: Vec<String>) -> SecurityFinding {
         SecurityFinding {
+            source: crate::model::NATIVE_SOURCE.into(),
             rule_id: rule.into(),
             title: "Title".into(),
             category: "SC01:Access Control".into(),
@@ -276,6 +281,23 @@ mod tests {
             s["runs"][0]["results"][0]["partialFingerprints"]["blockscan/v1"].as_str().unwrap(),
             a.as_str()
         );
+    }
+
+    /// This run says it is blockscan. An imported finding in it would be
+    /// blockscan claiming someone else's result, and would double-count against
+    /// that tool's own SARIF in any consumer that merges the two.
+    #[test]
+    fn an_imported_finding_stays_out_of_blockscans_own_run() {
+        let mut native = finding("TX_ORIGIN_AUTH", "High", 30, vec!["A.sol:1".into()]);
+        native.source = crate::model::NATIVE_SOURCE.into();
+        let mut foreign = finding("slither:reentrancy-eth", "High", 0, vec!["A.sol:2".into()]);
+        foreign.source = "slither".into();
+        let doc = build_sarif(&[contract_with(vec![native, foreign])]);
+        let results = doc["runs"][0]["results"].as_array().unwrap();
+        assert_eq!(results.len(), 1, "only the native finding: {results:?}");
+        assert_eq!(results[0]["ruleId"], "TX_ORIGIN_AUTH");
+        let rules = doc["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
+        assert_eq!(rules.len(), 1);
     }
 
     #[test]
