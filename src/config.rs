@@ -13,6 +13,9 @@ pub struct Config {
     /// Max Blockscout requests per second.
     pub blockscout_rate: u32,
     pub chain_id: u64,
+    /// Block to pin every state read to. `None` resolves the head once at scan
+    /// start; `Some(n)` scans chain state exactly as of block `n`.
+    pub pin_block: Option<u64>,
     pub out_dir: PathBuf,
     pub concurrency: usize,
     /// Max Etherscan requests per second.
@@ -94,6 +97,7 @@ mod tests {
             blockscout_base: String::new(),
             blockscout_rate: 4,
             chain_id: 1,
+            pin_block: None,
             out_dir: PathBuf::from("out"),
             concurrency: 5,
             rate: 5,

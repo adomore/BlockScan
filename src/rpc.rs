@@ -55,6 +55,14 @@ pub struct LogHit {
 pub struct RpcClient {
     provider: EthProvider,
     retries: u32,
+    /// The block every state read is answered at.
+    ///
+    /// `None` means the chain head, which is what these reads did before T-04:
+    /// two scans of one address on different days could disagree, and nothing in
+    /// the stored output said which chain state produced either answer. A scan
+    /// resolves the head once at the start and pins to it, so the whole run sees
+    /// one consistent chain.
+    pinned: Option<u64>,
 }
 
 impl RpcClient {
@@ -77,6 +85,7 @@ impl RpcClient {
         Ok(Self {
             provider,
             retries: retries.max(1),
+            pinned: None,
         })
     }
 
@@ -131,34 +140,72 @@ impl RpcClient {
         Ok(parse_trace_creations(&traces))
     }
 
-    /// Runtime bytecode at the latest block (empty if not a contract / self-destructed).
+    /// A clone of this client whose state reads are answered at `block`.
+    ///
+    /// Cloning rather than mutating because the client is shared across the
+    /// scan's concurrent tasks; the pin is decided once, before any of them run.
+    pub fn pinned_at(&self, block: u64) -> Self {
+        Self { pinned: Some(block), ..self.clone() }
+    }
+
+    /// The block this client pins state reads to, if any.
+    pub fn pinned_block(&self) -> Option<u64> {
+        self.pinned
+    }
+
+    /// The block identifier state reads use: the pin, or the head when unpinned.
+    fn read_at(&self) -> BlockId {
+        match self.pinned {
+            Some(n) => BlockId::Number(BlockNumberOrTag::Number(n)),
+            None => BlockId::Number(BlockNumberOrTag::Latest),
+        }
+    }
+
+    /// Hash of a block, so a run can record *which* chain state it read, not
+    /// only which height — heights are not unique across a reorg.
+    pub async fn block_hash(&self, number: u64) -> Result<Option<B256>> {
+        use alloy::rpc::types::BlockTransactionsKind;
+        let block = with_retry(self.retries, || async {
+            self.provider
+                .get_block_by_number(BlockNumberOrTag::Number(number), BlockTransactionsKind::Hashes)
+                .await
+                .map_err(|e| AppError::Rpc(e.to_string()))
+        })
+        .await?;
+        Ok(block.map(|b| b.header.hash))
+    }
+
+    /// Runtime bytecode at the pinned block (empty if not a contract / self-destructed).
     pub async fn get_code(&self, address: Address) -> Result<Bytes> {
         with_retry(self.retries, || async {
             self.provider
                 .get_code_at(address)
+                .block_id(self.read_at())
                 .await
                 .map_err(|e| AppError::Rpc(e.to_string()))
         })
         .await
     }
 
-    /// Balance in wei at the latest block.
+    /// Balance in wei at the pinned block.
     pub async fn get_balance(&self, address: Address) -> Result<U256> {
         with_retry(self.retries, || async {
             self.provider
                 .get_balance(address)
+                .block_id(self.read_at())
                 .await
                 .map_err(|e| AppError::Rpc(e.to_string()))
         })
         .await
     }
 
-    /// Read a storage slot and interpret the word as an EVM address.
+    /// Read a storage slot at the pinned block and interpret the word as an address.
     pub async fn storage_address(&self, address: Address, slot: B256) -> Result<Option<Address>> {
         let key = U256::from_be_bytes(slot.0);
         let word = with_retry(self.retries, || async {
             self.provider
                 .get_storage_at(address, key)
+                .block_id(self.read_at())
                 .await
                 .map_err(|e| AppError::Rpc(e.to_string()))
         })

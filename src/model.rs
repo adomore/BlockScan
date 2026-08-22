@@ -102,6 +102,19 @@ pub struct ContractDetails {
     pub address: String,
     pub chain_id: u64,
 
+    // ---- Chain state this record was read at (T-04) ----
+    /// Block every state read for this contract was answered at.
+    ///
+    /// `#[serde(default)]` so a `metadata.json` written before T-04 still loads;
+    /// `None` there means "read at whatever the head was", which is exactly the
+    /// ambiguity the field exists to remove.
+    #[serde(default)]
+    pub block_number: Option<u64>,
+    /// Hash of that block. The height alone does not identify chain state across
+    /// a reorg, so the hash is what makes a re-read verifiable.
+    #[serde(default)]
+    pub block_hash: Option<String>,
+
     // ---- On-chain (RPC) ----
     /// Runtime bytecode, hex-encoded with `0x` prefix.
     pub bytecode: String,
@@ -152,6 +165,8 @@ impl ContractDetails {
         Self {
             address: address.to_string(),
             chain_id,
+            block_number: None,
+            block_hash: None,
             bytecode: String::new(),
             bytecode_size: 0,
             balance_wei: "0".to_string(),
@@ -232,6 +247,8 @@ mod tests {
         ContractDetails {
             address: "0xabc".into(),
             chain_id: 1,
+            block_number: None,
+            block_hash: None,
             bytecode: "0x6001".into(),
             bytecode_size: 2,
             balance_wei: "0".into(),
@@ -286,6 +303,20 @@ mod tests {
         let f: SecurityFinding = serde_json::from_str(json).unwrap();
         assert_eq!(f.swc.as_deref(), Some("SWC-115"));
         assert!(f.scwe.is_none() && f.ethtrust.is_none());
+    }
+
+    #[test]
+    fn details_back_compat_without_block_pin() {
+        // A metadata.json written before T-04 carries no block_number/block_hash.
+        // It must still load, with the pin reading as "unknown" rather than
+        // failing the whole file (serde(default)).
+        let mut v = serde_json::to_value(sample()).unwrap();
+        let obj = v.as_object_mut().unwrap();
+        obj.remove("block_number");
+        obj.remove("block_hash");
+        let d: ContractDetails = serde_json::from_value(v).unwrap();
+        assert!(d.block_number.is_none() && d.block_hash.is_none());
+        assert_eq!(d.address, "0xabc");
     }
 
     #[test]

@@ -150,6 +150,7 @@ async fn mount_rpc_method(server: &MockServer, rpc_method: &str, result: Value) 
 /// Mount all RPC methods needed for a full scan. `code` is the getCode result.
 async fn mount_rpc_full(server: &MockServer, code: &str) {
     mount_rpc_method(server, "eth_blockNumber", json!("0x64")).await;
+    mount_rpc_method(server, "eth_getBlockByNumber", block_body("0x64")).await;
     mount_rpc_method(server, "eth_getCode", json!(code)).await;
     mount_rpc_method(server, "eth_getBalance", json!("0x0")).await;
     mount_rpc_method(
@@ -303,6 +304,7 @@ fn config(rpc: &str, es: &str, out: &Path, overwrite: bool) -> Config {
         blockscout_base: String::new(),
         blockscout_rate: 4,
         chain_id: 1,
+        pin_block: None,
         out_dir: out.to_path_buf(),
         concurrency: 4,
         rate: 1000,
@@ -468,6 +470,170 @@ fn addresses_cli(rpc: &str, es: &str, out: &str, overwrite: bool) -> Cli {
         args.push("--overwrite");
     }
     Cli::parse_from(args)
+}
+
+// ---------------------------------------------------------------------------
+// T-04 — every state read answers from one block
+// ---------------------------------------------------------------------------
+
+/// Hash the mock chain reports for whichever block is asked about.
+const PIN_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+/// What a read at `latest` gets. Nothing in a pinned scan may ever see it.
+const LATEST_SENTINEL: &str = "0xdeadbeef";
+
+/// A chain that moves under the scan.
+///
+/// `eth_blockNumber` reports a new head on every call, and `eth_getCode` /
+/// `eth_getBalance` answer differently per block, so a scan that reads at
+/// `latest` records whichever moment each individual read happened to land on.
+/// That is the condition T-04 removes, and it has to be present for a
+/// reproducibility test to mean anything.
+struct MovingChain {
+    head: std::sync::atomic::AtomicU64,
+}
+
+impl MovingChain {
+    fn from(head: u64) -> Self {
+        Self { head: std::sync::atomic::AtomicU64::new(head) }
+    }
+}
+
+/// A block body complete enough for alloy to deserialize a header from.
+fn block_body(number_hex: &str) -> Value {
+    let h32 = format!("0x{}", "0".repeat(64));
+    json!({
+        "hash": PIN_HASH,
+        "parentHash": h32,
+        "sha3Uncles": h32,
+        "miner": format!("0x{}", "0".repeat(40)),
+        "stateRoot": h32,
+        "transactionsRoot": h32,
+        "receiptsRoot": h32,
+        "logsBloom": format!("0x{}", "0".repeat(512)),
+        "difficulty": "0x0",
+        "number": number_hex,
+        "gasLimit": "0x0",
+        "gasUsed": "0x0",
+        "timestamp": "0x0",
+        "extraData": "0x",
+        "mixHash": h32,
+        "nonce": "0x0000000000000000",
+        "baseFeePerGas": "0x0",
+        "size": "0x0",
+        "totalDifficulty": "0x0",
+        "uncles": [],
+        "transactions": []
+    })
+}
+
+impl Respond for MovingChain {
+    fn respond(&self, req: &Request) -> ResponseTemplate {
+        use std::sync::atomic::Ordering;
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or(json!({}));
+        let id = body.get("id").cloned().unwrap_or(json!(1));
+        let m = body.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = body.get("params").and_then(Value::as_array).cloned().unwrap_or_default();
+        // The block identifier on a state read is the trailing positional arg.
+        let at = params.last().and_then(Value::as_str).unwrap_or("").to_string();
+        let result = match m {
+            "eth_blockNumber" => json!(format!("{:#x}", self.head.fetch_add(1, Ordering::SeqCst))),
+            "eth_getBlockByNumber" => {
+                block_body(params.first().and_then(Value::as_str).unwrap_or("0x0"))
+            }
+            "eth_getCode" | "eth_getBalance" if at == "latest" => json!(LATEST_SENTINEL),
+            "eth_getCode" => json!(format!("0x6080{}", at.trim_start_matches("0x"))),
+            "eth_getBalance" => json!(at),
+            "eth_getStorageAt" => json!(format!("0x{}", "0".repeat(64))),
+            "eth_getBlockReceipts" => json!([make_receipt(Some(CONTRACT_ADDR)), make_receipt(None)]),
+            _ => Value::Null,
+        };
+        ResponseTemplate::new(200).set_body_json(json!({
+            "jsonrpc": "2.0", "id": id, "result": result,
+        }))
+    }
+}
+
+/// `addresses` against a moving chain, optionally pinned with `--at-block`.
+fn pinned_cli(rpc: &str, es: &str, out: &str, at: Option<&str>) -> Cli {
+    let mut args = vec![
+        "blockscan", "addresses", USDC,
+        "--rpc-url", rpc,
+        "--etherscan-key", "k",
+        "--etherscan-base", es,
+        "--rate", "1000",
+        "-o", out,
+    ];
+    if let Some(block) = at {
+        args.push("--at-block");
+        args.push(block);
+    }
+    Cli::parse_from(args)
+}
+
+fn read_metadata(dir: &Path) -> String {
+    std::fs::read_to_string(dir.join(USDC.to_lowercase()).join("metadata.json"))
+        .expect("metadata.json")
+}
+
+/// The acceptance criterion: two scans at the same pinned block agree byte for
+/// byte. `ContractDetails` carries no timestamp, so the comparison is the whole
+/// file with nothing excluded.
+#[tokio::test]
+async fn two_scans_at_the_same_pin_produce_identical_metadata() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(MovingChain::from(100)).mount(&rpc).await;
+    mount_etherscan_ok(&es).await;
+
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    for dir in [a.path(), b.path()] {
+        run(
+            pinned_cli(&rpc.uri(), &es.uri(), dir.to_str().unwrap(), Some("4096")),
+            std::future::ready(()),
+        )
+        .await
+        .unwrap();
+    }
+
+    let first = read_metadata(a.path());
+    assert_eq!(first, read_metadata(b.path()), "same pin, different bytes");
+
+    let v: Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(v["block_number"], json!(4096), "the pin must be recorded");
+    assert_eq!(v["block_hash"], json!(PIN_HASH), "the height alone is not identifying");
+    // 4096 == 0x1000, so a read routed through the pin returns 0x6080 + "1000".
+    assert_eq!(v["bytecode"], json!("0x60801000"), "getCode did not use the pin");
+    assert_eq!(v["balance_wei"], json!("4096"), "getBalance did not use the pin");
+    assert!(
+        !first.contains(LATEST_SENTINEL),
+        "a state read fell through to `latest`: {first}"
+    );
+}
+
+/// Without `--at-block` the head is resolved once, at scan start. The mock hands
+/// out a new head on every `eth_blockNumber`, so a second resolution anywhere in
+/// the run would show up as a different recorded block.
+#[tokio::test]
+async fn an_unpinned_scan_resolves_the_head_exactly_once() {
+    let rpc = MockServer::start().await;
+    let es = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(MovingChain::from(0x2000)).mount(&rpc).await;
+    mount_etherscan_ok(&es).await;
+
+    let tmp = tempfile::tempdir().unwrap();
+    run(
+        pinned_cli(&rpc.uri(), &es.uri(), tmp.path().to_str().unwrap(), None),
+        std::future::ready(()),
+    )
+    .await
+    .unwrap();
+
+    let raw = read_metadata(tmp.path());
+    let v: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(v["block_number"], json!(0x2000), "the head moved mid-scan");
+    assert_eq!(v["bytecode"], json!("0x60802000"));
+    assert!(!raw.contains(LATEST_SENTINEL), "an unpinned scan still read at `latest`");
 }
 
 #[tokio::test]
@@ -774,6 +940,9 @@ async fn run_range_empty_block_saves_nothing() {
     let rpc = MockServer::start().await;
     let es = MockServer::start().await;
     mount_rpc_method(&rpc, "eth_getBlockReceipts", json!([])).await; // no creations
+    // The scan pins state reads to a block, so the chain needs a head.
+    mount_rpc_method(&rpc, "eth_blockNumber", json!("0x64")).await;
+    mount_rpc_method(&rpc, "eth_getBlockByNumber", block_body("0x64")).await;
     mount_etherscan_ok(&es).await;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -2901,6 +3070,9 @@ async fn run_addresses_detects_storage_proxy() {
     let rpc = MockServer::start().await;
     let es = MockServer::start().await;
     mount_rpc_method(&rpc, "eth_getCode", json!("0x6080604052")).await;
+    // The scan pins state reads to a block, so the chain needs a head.
+    mount_rpc_method(&rpc, "eth_blockNumber", json!("0x64")).await;
+    mount_rpc_method(&rpc, "eth_getBlockByNumber", block_body("0x64")).await;
     mount_rpc_method(&rpc, "eth_getBalance", json!("0x0")).await;
     let impl_hex = "00000000000000000000000000000000000000ad";
     mount_rpc_method(&rpc, "eth_getStorageAt", json!(storage_word(impl_hex))).await;
@@ -2924,6 +3096,9 @@ async fn run_addresses_eip1167_skips_storage_lookup() {
     let clone = format!("0x363d3d373d3d3d363d73{impl_hex}5af43d82803e903d91602b57fd5bf3");
     mount_rpc_method(&rpc, "eth_getCode", json!(clone)).await;
     mount_rpc_method(&rpc, "eth_getBalance", json!("0x0")).await;
+    // The scan pins state reads to a block, so the chain needs a head.
+    mount_rpc_method(&rpc, "eth_blockNumber", json!("0x64")).await;
+    mount_rpc_method(&rpc, "eth_getBlockByNumber", block_body("0x64")).await;
     // No eth_getStorageAt mount: bytecode already yields the impl, so the
     // storage-slot lookup is skipped (covers the implementation-present branch).
     mount_etherscan_unverified(&es).await;

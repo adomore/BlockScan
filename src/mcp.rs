@@ -830,6 +830,7 @@ fn build_scan_config(
         blockscout_base: String::new(),
         blockscout_rate: 4,
         chain_id: args.get("chain_id").and_then(Value::as_u64).unwrap_or(1),
+        pin_block: None,
         out_dir,
         concurrency: 5,
         rate: 5,
@@ -893,7 +894,11 @@ async fn tool_scan_addresses(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
     if let Err(e) = cfg.validate() {
         return ToolOutcome::ToolError(e.to_string());
     }
-    let (_rpc, scanner) = match crate::build_scanner(&cfg) {
+    let (rpc, scanner) = match crate::build_scanner(&cfg) {
+        Ok(x) => x,
+        Err(e) => return ToolOutcome::ToolError(e.to_string()),
+    };
+    let (_rpc, scanner) = match crate::pin_to_block(&cfg, rpc, scanner).await {
         Ok(x) => x,
         Err(e) => return ToolOutcome::ToolError(e.to_string()),
     };
@@ -920,6 +925,10 @@ async fn tool_scan_block_range(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
         return ToolOutcome::ToolError(e.to_string());
     }
     let (rpc, scanner) = match crate::build_scanner(&cfg) {
+        Ok(x) => x,
+        Err(e) => return ToolOutcome::ToolError(e.to_string()),
+    };
+    let (rpc, scanner) = match crate::pin_to_block(&cfg, rpc, scanner).await {
         Ok(x) => x,
         Err(e) => return ToolOutcome::ToolError(e.to_string()),
     };

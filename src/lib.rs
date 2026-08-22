@@ -59,6 +59,7 @@ pub fn config_from_cli(g: &GlobalArgs) -> Config {
         blockscout_base: g.blockscout_base.clone(),
         blockscout_rate: g.blockscout_rate,
         chain_id: g.chain_id,
+        pin_block: g.at_block,
         out_dir: g.out.clone(),
         concurrency: g.concurrency,
         rate: g.rate,
@@ -137,7 +138,11 @@ fn build_scanner(cfg: &Config) -> error::Result<(RpcClient, Scanner)> {
 }
 
 /// Validate + build a chain's clients, or `None` when no RPC is configured.
-fn prepare_chain(
+///
+/// Async because the block pin is resolved here, once, before the first
+/// address is read: every state read in the run then answers from the same
+/// block. `--at-block` overrides the head.
+async fn prepare_chain(
     g: &GlobalArgs,
     chain: u64,
     multichain: bool,
@@ -152,7 +157,58 @@ fn prepare_chain(
         tracing::info!("=== chain {chain} ({}) ===", chains::chain_name(chain));
     }
     let (rpc, scanner) = build_scanner(&cfg)?;
+    let (rpc, scanner) = pin_to_block(&cfg, rpc, scanner).await?;
     Ok(Some((cfg, rpc, scanner)))
+}
+
+/// Resolve the block every state read in this run answers from, and pin both
+/// clients to it.
+///
+/// `cfg.pin_block` wins when set; otherwise the head is read once here. The
+/// block hash is recorded alongside the height because a height alone does not
+/// survive a reorg — two runs at "block 19000000" can be different chains. A
+/// node that cannot serve the hash is not fatal: the pin still holds the run
+/// together, it is only less identifiable afterwards.
+pub(crate) async fn pin_to_block(
+    cfg: &Config,
+    rpc: RpcClient,
+    scanner: Scanner,
+) -> error::Result<(RpcClient, Scanner)> {
+    let block = match cfg.pin_block {
+        Some(n) => n,
+        // An unreachable node cannot serve a state read either, so this failure
+        // resurfaces on the first address that actually needs one. Refusing to
+        // start here would break the offline case that reads nothing at all —
+        // a rerun over contracts already on disk. The run continues unpinned,
+        // and says so twice: in this warning and as a null `block_number` on
+        // every record it writes.
+        None => match rpc.block_number().await {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!("could not resolve a head to pin state reads to: {e}");
+                return Ok((rpc, scanner));
+            }
+        },
+    };
+    let hash = match rpc.block_hash(block).await {
+        Ok(Some(h)) => Some(format!("{h:#x}")),
+        // Only reachable for an explicit --at-block: a head just read back from
+        // this same node is a block it knows.
+        Ok(None) => {
+            return Err(error::AppError::Config(format!(
+                "--at-block {block} is not a block this RPC knows"
+            )))
+        }
+        Err(e) => {
+            tracing::warn!("could not read the hash of block {block}: {e}");
+            None
+        }
+    };
+    tracing::info!(
+        "state reads pinned to block {block}{}",
+        hash.as_deref().map(|h| format!(" ({h})")).unwrap_or_default()
+    );
+    Ok((rpc.pinned_at(block), scanner.pinned_at(block, hash)))
 }
 
 /// Build just the RPC client for a chain. `monitor` needs only `eth_getLogs`, so
@@ -264,7 +320,7 @@ where
                         "watch download mode ignores alert flags (--alerts/--webhook-url/--baseline/--throttle/--group/--digest-interval/--min-transfer/--watchlist/--alert-topic); pass --alert-events or --alert-on-risk to use them"
                     );
                 }
-                match prepare_chain(g, chains[0], false)? {
+                match prepare_chain(g, chains[0], false).await? {
                     Some((cfg, rpc, scanner)) => {
                         let (total, contracts) = watch_with_shutdown(
                             &rpc, &scanner, args, cfg.trace, g.format, watch_shutdown,
@@ -288,7 +344,7 @@ where
             let mut grand = RunStats::default();
             let mut contracts: Vec<ContractDetails> = Vec::new();
             for chain in &chains {
-                if let Some((_cfg, _rpc, scanner)) = prepare_chain(g, *chain, multichain)? {
+                if let Some((_cfg, _rpc, scanner)) = prepare_chain(g, *chain, multichain).await? {
                     tracing::info!("scanning {} address(es)", addrs.len());
                     let (stats, mut got) = scanner.process_addresses(addrs.clone()).await;
                     print_summary(&stats, g.format);
@@ -307,7 +363,7 @@ where
             let mut grand = RunStats::default();
             let mut contracts: Vec<ContractDetails> = Vec::new();
             for chain in &chains {
-                if let Some((cfg, rpc, scanner)) = prepare_chain(g, *chain, multichain)? {
+                if let Some((cfg, rpc, scanner)) = prepare_chain(g, *chain, multichain).await? {
                     tracing::info!("scanning blocks {}..={}", args.from, args.to);
                     let mut total = RunStats::default();
                     for n in args.from..=args.to {
@@ -337,7 +393,7 @@ where
             let mut grand = RunStats::default();
             let mut contracts: Vec<ContractDetails> = Vec::new();
             for chain in &chains {
-                if let Some((_cfg, _rpc, scanner)) = prepare_chain(g, *chain, multichain)? {
+                if let Some((_cfg, _rpc, scanner)) = prepare_chain(g, *chain, multichain).await? {
                     let addrs = discover_addresses(&scanner, &args).await;
                     if addrs.is_empty() {
                         tracing::warn!("no contracts discovered on chain {chain}");
@@ -711,7 +767,7 @@ pub async fn run_monitor(
         };
         if args.audit_deployments {
             // Needs the full scanner (Etherscan source) to audit deployments.
-            let Some((_cfg, rpc, scanner)) = prepare_chain(g, *chain, multichain)? else {
+            let Some((_cfg, rpc, scanner)) = prepare_chain(g, *chain, multichain).await? else {
                 continue;
             };
             total.add(
@@ -1190,7 +1246,7 @@ where
     let mut prepared: Vec<(u64, RpcClient, Option<Scanner>)> = Vec::new();
     for chain in chains {
         if args.alert_on_risk {
-            if let Some((_cfg, rpc, scanner)) = prepare_chain(g, *chain, multichain)? {
+            if let Some((_cfg, rpc, scanner)) = prepare_chain(g, *chain, multichain).await? {
                 prepared.push((*chain, rpc, Some(scanner)));
             }
         } else if let Some(rpc) = prepare_chain_rpc(g, *chain, multichain)? {

@@ -77,6 +77,13 @@ pub struct GlobalArgs {
     #[arg(long, global = true, default_value_t = 1)]
     pub chain_id: u64,
 
+    /// Read chain state as of this block instead of the chain head. A scan
+    /// takes minutes; without a pin its reads land on whichever head was
+    /// current at each moment, so a run is not reproducible. Omitted, the head
+    /// is resolved once at scan start and used for the whole run.
+    #[arg(long = "at-block", global = true, value_name = "BLOCK")]
+    pub at_block: Option<u64>,
+
     /// Output directory.
     #[arg(long, short, global = true, default_value = "output")]
     pub out: PathBuf,

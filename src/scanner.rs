@@ -32,6 +32,10 @@ pub struct Scanner {
     etherscan: EtherscanClient,
     blockscout: Blockscout,
     sourcify: Sourcify,
+    /// Hash of the block `rpc` pins state reads to, resolved once with the pin.
+    /// Recorded on every contract so a reader knows which chain state produced
+    /// the result — the height alone does not survive a reorg.
+    block_hash: Option<String>,
 }
 
 /// Aggregate counters for the run summary.
@@ -59,7 +63,20 @@ impl Scanner {
             etherscan,
             blockscout,
             sourcify,
+            block_hash: None,
         }
+    }
+
+    /// This scanner with every state read pinned to `block`.
+    ///
+    /// A scan reads code, balance and proxy slots per address over minutes. Left
+    /// unpinned each read lands on whatever head the node had at that instant,
+    /// so one run can mix pre- and post-upgrade state and is not reproducible.
+    /// The pin is resolved once, at scan start, and applies to the whole run.
+    pub fn pinned_at(mut self, block: u64, hash: Option<String>) -> Self {
+        self.rpc = self.rpc.pinned_at(block);
+        self.block_hash = hash;
+        self
     }
 
     /// The chain id this scanner targets.
@@ -236,6 +253,11 @@ impl Scanner {
 
         let mut built =
             build_details(address_str, self.cfg.chain_id, &code, balance, src, creation);
+        // Stamp the chain state these reads were answered at. build_details is
+        // pure over the data it is handed; the pin belongs to the scan, not to
+        // the contract, so it is applied here where the scan knows it.
+        built.details.block_number = self.rpc.pinned_block();
+        built.details.block_hash = self.block_hash.clone();
 
         // Storage-slot proxy fallback (EIP-1967/1822) when no implementation yet.
         if built.details.implementation.is_none() {
@@ -350,6 +372,9 @@ pub fn build_details(
     let details = ContractDetails {
         address: address.to_string(),
         chain_id,
+        // Pure over its inputs: the scan stamps the pin, not this function.
+        block_number: None,
+        block_hash: None,
         bytecode_size: code.len(),
         bytecode,
         balance_wei: balance.to_string(),
@@ -596,6 +621,7 @@ mod tests {
             blockscout_base: String::new(),
             blockscout_rate: 4,
             chain_id: 1,
+            pin_block: None,
             out_dir: std::path::PathBuf::from("out"),
             concurrency: 1,
             rate: 5,
@@ -712,6 +738,7 @@ mod tests {
             blockscout_base: String::new(),
             blockscout_rate: 4,
             chain_id: 1,
+            pin_block: None,
             out_dir: std::path::PathBuf::from("out"),
             concurrency: 2,
             rate: 5,

@@ -183,6 +183,8 @@ mod tests {
         ContractDetails {
             address: "0x000000000004444c5dc75cb358380d2e3de08a90".into(),
             chain_id: 1,
+            block_number: None,
+            block_hash: None,
             bytecode: "0x60".into(),
             bytecode_size: 24009,
             balance_wei: "51272692007008651583944".into(),
