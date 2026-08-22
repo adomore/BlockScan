@@ -540,17 +540,27 @@ pub fn audit_with(d: &ContractDetails, sources: &[SourceFile], supp: &Suppressio
         .collect();
 
     // Drop suppressed findings before scoring/summarizing so a silenced false
-    // positive lowers the risk score too (not just the displayed list).
+    // positive lowers the risk score too (not just the displayed list). Because
+    // that makes the score depend on the suppression file, how many went is
+    // recorded alongside it — a number nobody can audit is not a measurement.
+    let mut suppressed = 0usize;
     if !supp.is_empty() {
+        let before = findings.len();
         findings.retain(|f| !supp.is_suppressed(f));
+        suppressed = before - findings.len();
     }
 
     let risk_score = overall_risk(&findings);
+    let mut summary = summarize(&findings);
+    // Counts every dropped finding, native or imported: the question the number
+    // answers is "how much was taken out of this score", and an imported
+    // finding that was suppressed was taken out of it just the same.
+    summary.suppressed = suppressed;
     Audit {
         grade: grade(risk_score).to_string(),
         risk_level: risk_level(risk_score).to_string(),
         risk_score,
-        summary: summarize(&findings),
+        summary,
         findings,
     }
 }
@@ -1580,6 +1590,35 @@ mod tests {
         assert_eq!(tx.ethtrust.as_deref(), Some("req-1-no-tx.origin [S]"));
         assert!(tx.references.iter().any(|r| r.contains("scs.owasp.org/SCWE/SCWE-018")));
         assert!(tx.references.iter().any(|r| r.contains("entethalliance.org") && r.contains("req-1-no-tx.origin")));
+    }
+
+    /// T-16: the score is computed after suppression, so the summary records
+    /// how many findings that removed. Without it the number is unauditable —
+    /// two contracts can show the same score for entirely different reasons.
+    #[test]
+    fn the_summary_records_how_many_findings_suppression_removed() {
+        let src = "pragma solidity ^0.8.0;\ncontract C {\n  function f() public { require(tx.origin == owner); }\n}";
+        let (d, s) = verified(src, "v0.8.19");
+
+        let clean = audit(&d, &s);
+        assert_eq!(clean.summary.suppressed, 0, "an unsuppressed run reports 0");
+        assert!(
+            clean.findings.iter().any(|f| f.rule_id == "TX_ORIGIN_AUTH"),
+            "the fixture has to produce the finding being suppressed"
+        );
+
+        use crate::suppress::Suppressions;
+        let supp: Suppressions =
+            serde_json::from_str(r#"{"suppress":[{"rule":"TX_ORIGIN_AUTH"}]}"#).unwrap();
+        let quiet = audit_with(&d, &s, &supp);
+        assert!(!quiet.findings.iter().any(|f| f.rule_id == "TX_ORIGIN_AUTH"));
+        assert_eq!(
+            quiet.summary.suppressed,
+            clean.findings.len() - quiet.findings.len(),
+            "the count must equal what actually went"
+        );
+        assert!(quiet.summary.suppressed > 0);
+        assert!(quiet.risk_score < clean.risk_score, "and the score moved with it");
     }
 
     #[test]

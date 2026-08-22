@@ -653,9 +653,15 @@ pub fn run_audit(g: &GlobalArgs, args: &AuditArgs) -> error::Result<()> {
                         .iter()
                         .filter_map(|p| a.summary.by_priority.get(*p).map(|n| format!("{p}:{n}")))
                         .collect();
+                    // The score was computed after suppression, so the line
+                    // that prints it says how many findings that removed.
+                    let supp = match a.summary.suppressed {
+                        0 => String::new(),
+                        n => format!(" -{n} suppressed"),
+                    };
                     println!(
-                        "{} {:>3}/100 {:<8} {} {}  [{}]",
-                        a.grade, a.risk_score, a.risk_level, d.address, name, prio.join(" ")
+                        "{} {:>3}/100 {:<8} {} {}  [{}]{}",
+                        a.grade, a.risk_score, a.risk_level, d.address, name, prio.join(" "), supp
                     );
                 }
             }

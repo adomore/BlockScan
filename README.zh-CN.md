@@ -29,7 +29,7 @@
 
 ## 安装与构建
 
-需要 Rust 工具链与一个 C/C++ 链接器（Windows 推荐 MSVC Build Tools，或 MinGW）。
+需要 **Rust 1.97.1 及以上**（声明在 `Cargo.toml` 的 `rust-version`；这个下限来自 `slang_solidity` 解析器，不是偏好）与一个 C/C++ 链接器（Windows 推荐 MSVC Build Tools，或 MinGW）。CI 有一个 job 按该版本构建。
 
 ```bash
 cargo build --release

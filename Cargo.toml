@@ -2,6 +2,12 @@
 name = "blockscan"
 version = "1.1.0"
 edition = "2021"
+# The floor is not a preference: slang_solidity 1.3.8 and its metaslang crates —
+# the parser the AST tier runs on — declare rust-version 1.97.1, and nothing in
+# the locked graph asks for more. Declaring it makes an inherited constraint
+# visible instead of leaving CI to build against whatever is stable that day.
+# The `msrv` CI job reads this value rather than repeating it.
+rust-version = "1.97.1"
 description = "Scan Ethereum smart contracts: discover, download verified source + bytecode + details, run a standardized security audit, and emit machine/human output"
 license = "MIT"
 readme = "README.md"

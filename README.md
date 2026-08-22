@@ -29,7 +29,7 @@ See the sections below for detailed usage.
 
 ## Install & build
 
-Requires the Rust toolchain and a C/C++ linker (MSVC Build Tools recommended on Windows, or MinGW).
+Requires **Rust 1.97.1 or newer** (`rust-version` in `Cargo.toml`; the floor comes from the `slang_solidity` parser, not from a preference) and a C/C++ linker (MSVC Build Tools recommended on Windows, or MinGW). A CI job builds against exactly that version.
 
 ```bash
 cargo build --release

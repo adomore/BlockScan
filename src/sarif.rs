@@ -31,6 +31,16 @@ pub fn build_sarif(contracts: &[ContractDetails]) -> Value {
         }
     }
 
+    // A SARIF consumer sees only the results that survived suppression, so the
+    // run says how many did not. `properties` is the SARIF-sanctioned place for
+    // a producer-specific fact, and it does not disturb any consumer that
+    // ignores it.
+    let suppressed: usize = contracts
+        .iter()
+        .filter_map(|d| d.audit.as_ref())
+        .map(|a| a.summary.suppressed)
+        .sum();
+
     json!({
         "version": "2.1.0",
         "$schema": SARIF_SCHEMA,
@@ -42,6 +52,7 @@ pub fn build_sarif(contracts: &[ContractDetails]) -> Value {
                 "rules": rules,
             }},
             "results": results,
+            "properties": { "suppressedFindings": suppressed },
         }]
     })
 }
@@ -162,6 +173,53 @@ fn precision(confidence: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+
+    /// T-16: the count has to survive the trip to every surface a reader might
+    /// look at, not just exist on the struct. `done_when` names three; the
+    /// report document is checked too, because that is the one people forward.
+    #[test]
+    fn the_suppressed_count_reaches_json_sarif_and_the_human_table() {
+        use crate::model::{Audit, AuditSummary, ContractDetails};
+        let mut d = ContractDetails::minimal("0x00000000000000000000000000000000000000ff", 1);
+        d.audit = Some(Audit {
+            risk_score: 12,
+            grade: "B".into(),
+            risk_level: "Low".into(),
+            findings: vec![],
+            summary: AuditSummary { suppressed: 4, ..Default::default() },
+        });
+        let all = [d.clone()];
+
+        // JSON — serde carries it wherever ContractDetails goes.
+        let json = serde_json::to_value(&d).unwrap();
+        assert_eq!(json["audit"]["summary"]["suppressed"], 4);
+
+        // SARIF.
+        assert_eq!(build_sarif(&all)["runs"][0]["properties"]["suppressedFindings"], 4);
+
+        // The human --table cell.
+        let table = crate::report::render_contract_table(&d, &Default::default());
+        assert!(table.contains("已抑制 4"), "{table}");
+
+        // And the report document, whose whole job is to be read by a person.
+        let md = crate::export::render_markdown(&all);
+        assert!(md.contains("4 suppressed"), "{md}");
+        assert!(crate::export::render_html(&all).contains("4 suppressed"));
+    }
+
+    /// Nothing suppressed means nothing said: a permanent "0 suppressed" on
+    /// every contract trains the eye to skip the line that matters.
+    #[test]
+    fn an_unsuppressed_audit_adds_no_note() {
+        use crate::model::{Audit, ContractDetails};
+        let mut d = ContractDetails::minimal("0x00000000000000000000000000000000000000ff", 1);
+        d.audit = Some(Audit { grade: "A".into(), risk_level: "Minimal".into(), ..Default::default() });
+        let all = [d.clone()];
+        assert!(!crate::export::render_markdown(&all).contains("suppressed"));
+        assert!(!crate::export::render_html(&all).contains("suppressed"));
+        assert!(!crate::report::render_contract_table(&d, &Default::default()).contains("抑制"));
+    }
+
     use super::*;
     use crate::model::{Audit, SecurityFinding};
 
@@ -213,6 +271,9 @@ mod tests {
         assert_eq!(s["version"], "2.1.0");
         assert!(s["$schema"].as_str().unwrap().contains("sarif"));
         assert_eq!(s["runs"][0]["tool"]["driver"]["name"], "blockscan");
+        // T-16: a SARIF consumer sees only what survived suppression, so the run
+        // states how many did not. Zero here — this fixture suppresses nothing.
+        assert_eq!(s["runs"][0]["properties"]["suppressedFindings"], 0);
         assert_eq!(s["runs"][0]["results"].as_array().unwrap().len(), 1);
         assert_eq!(s["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap().len(), 1);
         let rule = &s["runs"][0]["tool"]["driver"]["rules"][0];

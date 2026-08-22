@@ -119,10 +119,18 @@ fn audit_score_cell(a: &Option<Audit>) -> String {
 }
 
 /// Findings cell: severity tally like `high×2, medium×1`, or `无` / `-`.
+///
+/// A suppressed count is appended when non-zero. The score in the cell beside
+/// this one is computed after those were dropped, so leaving it out would show
+/// a number without showing what it excludes.
 fn audit_findings_cell(a: &Option<Audit>) -> String {
     let Some(a) = a else { return "-".to_string() };
+    let suppressed = match a.summary.suppressed {
+        0 => String::new(),
+        n => format!("（已抑制 {n}）"),
+    };
     if a.findings.is_empty() {
-        return "无".to_string();
+        return if suppressed.is_empty() { "无".to_string() } else { format!("无{suppressed}") };
     }
     let mut parts = Vec::new();
     for sev in ["critical", "high", "medium", "low", "info"] {
@@ -133,7 +141,7 @@ fn audit_findings_cell(a: &Option<Audit>) -> String {
             parts.push(format!("{sev}×{n}"));
         }
     }
-    parts.join(", ")
+    format!("{}{suppressed}", parts.join(", "))
 }
 
 /// Abbreviate a `0x…`-hash to its first 10 hex chars + ellipsis; dash when empty.

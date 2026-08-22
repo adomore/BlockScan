@@ -206,6 +206,19 @@ fn ordered_findings(a: &Audit) -> Vec<&SecurityFinding> {
     v
 }
 
+/// What a score leaves out, when it leaves anything out.
+///
+/// The score is computed after suppressed findings are dropped, so a document
+/// that prints the score without this is printing a number whose derivation the
+/// reader cannot see. Empty when nothing was suppressed, so an ordinary report
+/// gains no noise.
+fn suppressed_note(a: &Audit) -> String {
+    match a.summary.suppressed {
+        0 => String::new(),
+        n => format!(", {n} suppressed"),
+    }
+}
+
 fn display_name(d: &ContractDetails) -> &str {
     d.contract_name.as_deref().filter(|n| !n.is_empty()).unwrap_or("(unverified)")
 }
@@ -338,7 +351,15 @@ pub fn render_markdown(contracts: &[ContractDetails]) -> String {
         let grade = d
             .audit
             .as_ref()
-            .map(|a| format!(" — grade {} ({}/100, {})", a.grade, a.risk_score, a.risk_level))
+            .map(|a| {
+                format!(
+                    " — grade {} ({}/100, {}{})",
+                    a.grade,
+                    a.risk_score,
+                    a.risk_level,
+                    suppressed_note(a)
+                )
+            })
             .unwrap_or_default();
         m.push_str(&format!(
             "### {} {}{}\n\n",
@@ -556,10 +577,11 @@ pub fn render_html(contracts: &[ContractDetails]) -> String {
         ));
         if let Some(a) = &d.audit {
             h.push_str(&format!(
-                "<p>Grade <strong>{}</strong> · {}/100 · {}</p>\n",
+                "<p>Grade <strong>{}</strong> · {}/100 · {}{}</p>\n",
                 html_escape(&a.grade),
                 a.risk_score,
-                html_escape(&a.risk_level)
+                html_escape(&a.risk_level),
+                suppressed_note(a)
             ));
         }
 

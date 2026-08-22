@@ -94,6 +94,16 @@ pub struct SecurityFinding {
 /// Aggregate matrices over a contract's findings (for the report layer).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuditSummary {
+    /// Findings the suppression file removed before scoring.
+    ///
+    /// `audit_with` drops matched findings *before* the score is computed, so a
+    /// silenced false positive lowers the number too. That is the right
+    /// behaviour and it makes the score a function of the suppression file, so
+    /// a reader of the score has to be able to see how much was taken out of
+    /// it. `0` on every unsuppressed run, and `#[serde(default)]` so a
+    /// `metadata.json` written before this field still loads.
+    #[serde(default)]
+    pub suppressed: usize,
     pub by_severity: std::collections::BTreeMap<String, usize>,
     pub by_category: std::collections::BTreeMap<String, usize>,
     pub by_confidence: std::collections::BTreeMap<String, usize>,
@@ -346,6 +356,25 @@ mod tests {
         let f: SecurityFinding = serde_json::from_str(json).unwrap();
         assert_eq!(f.swc.as_deref(), Some("SWC-115"));
         assert!(f.scwe.is_none() && f.ethtrust.is_none());
+    }
+
+    /// T-16: an `AuditSummary` written before the field still loads, and reads
+    /// as "nothing was suppressed" rather than failing the whole record.
+    #[test]
+    fn summary_back_compat_without_suppressed_count() {
+        let mut v = serde_json::to_value(AuditSummary::default()).unwrap();
+        v.as_object_mut().unwrap().remove("suppressed");
+        let s: AuditSummary = serde_json::from_value(v).unwrap();
+        assert_eq!(s.suppressed, 0);
+    }
+
+    /// And it survives a round trip, because the whole point is that a reader of
+    /// a stored score can see what the score excludes.
+    #[test]
+    fn summary_round_trips_the_suppressed_count() {
+        let s = AuditSummary { suppressed: 3, ..Default::default() };
+        let back: AuditSummary = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.suppressed, 3);
     }
 
     #[test]
