@@ -1,0 +1,107 @@
+{
+  "$comment": [
+    "False-positive budget (task T-10). Contracts that are widely held, heavily",
+    "audited, and long-lived. CI asserts each produces zero High or Critical",
+    "findings. blockscan passes this gate today; the point of adding it is to",
+    "keep passing it after a refactor nobody remembers making.",
+    "",
+    "This is the gate that catches the specific failure the comparison subject",
+    "demonstrates: it rates WETH9 critical at 100/100 on five separate false",
+    "findings, and none of its 320 tests notices.",
+    "",
+    "SEEDING STATE — READ THIS BEFORE USING THE FILE.",
+    "Only entries with verified=true were confirmed against real scan output.",
+    "Everything else is specified as a SELECTION PROCEDURE rather than an",
+    "address, because an audit corpus containing a wrong address is worse than",
+    "no corpus: it produces a green gate that proves nothing. Fill the",
+    "candidates in from a block explorer, verify each, and flip verified to",
+    "true with the block you pinned it at."
+  ],
+
+  "version": 1,
+  "purpose": "false-positive budget",
+  "gate": {
+    "assertion": "zero findings of severity High or Critical on every entry",
+    "failure_mode": "fail the build, not warn",
+    "rationale": "A warning in CI output is a warning nobody reads. This assertion is the only thing standing between a rule regression and a customer seeing a blue-chip contract rated critical."
+  },
+
+  "entries": [
+    {
+      "chain_id": 1,
+      "address": "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2",
+      "name": "WETH9",
+      "verified": true,
+      "verified_how": "present in real scan output examined during this audit; source verified, contract_name WETH9, holding ~2.44M ETH",
+      "pinned_block": "PIN_ME",
+      "why_in_set": "The single most-held contract on Ethereum and the exact contract the comparison subject mis-rates. If one entry survives a corpus rebuild, it should be this one.",
+      "known_acceptable_findings": [
+        {
+          "rule_id": "OUTDATED_COMPILER",
+          "severity": "Medium",
+          "reason": "WETH9 is solc 0.4.x. The finding is correct and below the gate threshold; recorded so a future reader does not mistake it for noise."
+        }
+      ]
+    }
+  ],
+
+  "candidates_to_seed": {
+    "$comment": "Categories, not addresses. Each is chosen to exercise a different part of the detector surface, so a regression in any one family is caught by at least one entry. Resolve each to a real address, verify it, then move it into entries.",
+    "required": [
+      {
+        "slot": "major-stablecoin-proxy",
+        "criteria": "A top-3 stablecoin by supply, deployed behind an upgradeable proxy, source verified.",
+        "exercises": "proxy resolution, implementation fetch, owner-control rules (OWNER_BLACKLIST_CONTROL is expected to fire at Low — verify it stays Low, since a blacklist is intentional in this class and a severity drift would break the gate)",
+        "count": 1
+      },
+      {
+        "slot": "amm-pair",
+        "criteria": "A canonical constant-product AMM pair contract, source verified, high TVL.",
+        "exercises": "ORACLE_SPOT_PRICE_FROM_RESERVES must NOT fire on the pair itself — the pair holds the reserves, it does not read them as a price. This is the highest-value single entry for oracle-rule precision.",
+        "count": 1
+      },
+      {
+        "slot": "amm-router",
+        "criteria": "The router paired with the AMM above.",
+        "exercises": "MEV_SWAP_DEADLINE_BLOCK_TIMESTAMP and MEV_SWAP_ZERO_AMOUNT_OUT_MIN must not fire on a router that correctly takes deadline and minimum-out as parameters.",
+        "count": 1
+      },
+      {
+        "slot": "lending-market",
+        "criteria": "A major lending protocol's core market or comptroller, source verified.",
+        "exercises": "Chainlink staleness rules and access-control rules on a contract that does guard correctly.",
+        "count": 1
+      },
+      {
+        "slot": "governor",
+        "criteria": "A widely-forked on-chain governor with a timelock.",
+        "exercises": "The three GOV_ rules must not fire on a governor that does use a timelock and a non-zero proposal threshold.",
+        "count": 1
+      },
+      {
+        "slot": "erc721-blue-chip",
+        "criteria": "A large, long-lived NFT collection, source verified.",
+        "exercises": "ERC-721 interface detection, and the reentrancy rule on a contract using safeTransferFrom callbacks legitimately.",
+        "count": 1
+      },
+      {
+        "slot": "minimal-proxy-factory",
+        "criteria": "A factory deploying EIP-1167 clones, plus two of its clones.",
+        "exercises": "Minimal-proxy detection, clone clustering, and the T-11 shared-implementation rule — this slot is the one that gives the protocol layer a real positive case.",
+        "count": 3
+      }
+    ],
+    "target_size": "10 contracts. Small on purpose: every entry must be individually justified and individually reviewed when it fires. A large known-good set that nobody reads is a rubber stamp."
+  },
+
+  "maintenance": {
+    "pinned_block_required": true,
+    "pinned_block_rationale": "A known-good contract behind a proxy can be upgraded. Without a pinned block the gate silently changes what it asserts, which is the same defect as task T-04 seen from the corpus side.",
+    "on_gate_failure": [
+      "Do NOT add the rule to the suppression file. Suppression drops findings before scoring and would hide the regression from the metric as well as the gate.",
+      "Do NOT lower the entry's expected severity to make it pass.",
+      "Either the rule regressed and the rule is fixed, or the finding is genuinely correct and belongs in known_acceptable_findings with a written reason."
+    ],
+    "review_cadence": "Re-pin on each release. A stale pin is still reproducible, which is the property that matters; a moving pin is not."
+  }
+}
