@@ -310,7 +310,9 @@ In machine modes **stdout is data only** (pipe to `jq`); `monitor`/`watch` stdou
   source/           # verified source (multi-file projects keep their original paths)
 ```
 - **Resume/dedup**: an existing `metadata.json` is skipped by default; `--overwrite` forces a re-fetch.
-- `--manifest <file.json|.csv>`: export a summary of all saved contracts; a `clusters.json` (clone families by metadata-stripped bytecode hash) is written alongside it.
+- `--manifest <file>`: format chosen by **extension**. `.json` / `.csv` are the pipeline formats (under a scan command a `clusters.json` — clone families by metadata-stripped bytecode hash — is written alongside); `.md` / `.html` are a **report somebody reads**, carrying the overview, the severity tally and each contract's findings with their locations, evidence and remediation. The HTML is a **single self-contained file** (styles inlined, no scripts, no external requests), so it can be attached and forwarded as is.
+  - With the `audit` subcommand it writes the **filtered** set, so `--min-risk` / `--only-vulnerable` / `--by-risk` decide what goes in the report: `blockscan audit --only-vulnerable --manifest report.md`.
+  - **No PDF**: `.pdf` is refused rather than silently written as JSON. For PDF, hand the `.md` or `.html` to an established pipeline (pandoc, or a browser's print-to-PDF).
 - `--table`: print a normalized per-contract table (Blockscout's free API is queried for name tag / project URL / token holdings enrichment).
 - **Multichain** `--chains 1,10,8453,…`: each chain's RPC comes from `ETH_RPC_URL_<id>` (falling back to `ETH_RPC_URL`); non-mainnet/multichain output is segregated into per-chain subdirs so the same address on different chains never collides.
 
@@ -337,7 +339,7 @@ In machine modes **stdout is data only** (pipe to `jq`); `monitor`/`watch` stdou
 | `--no-audit` | false | Disable the security audit |
 | `--min-risk <0–100>` / `--only-vulnerable` | — | Audit filters |
 | `--suppress <file>` | — | Audit suppression config |
-| `--manifest <file>` | — | Export json/csv summary + clusters.json |
+| `--manifest <file>` | — | By extension: `.json`/`.csv` summary (+clusters.json), `.md`/`.html` report document, `.pdf` refused |
 | `--format human\|json\|ndjson\|sarif` | human | Output format |
 | `-v` / `-vv` | — | Increase log verbosity (stderr) |
 

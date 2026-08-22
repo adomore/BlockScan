@@ -652,6 +652,19 @@ pub fn run_audit(g: &GlobalArgs, args: &AuditArgs) -> error::Result<()> {
             );
         }
     }
+
+    // `--manifest` from here writes the *filtered, ordered* set this subcommand
+    // just built, not the whole corpus: with a `.md` or `.html` extension that
+    // is the document the audit produces, and --min-risk / --only-vulnerable /
+    // --by-risk are exactly the knobs that decide what belongs in it.
+    if let Some(path) = &g.manifest {
+        export::write_manifest(path, &contracts)?;
+        tracing::info!(
+            "wrote {} contract(s) to {}",
+            contracts.len(),
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -1725,6 +1738,45 @@ mod tests {
         write_manifest_if_set(&g).unwrap();
         assert!(manifest.exists());
         assert!(tmp.path().join("clusters.json").exists());
+    }
+
+    /// T-14: `audit --manifest report.md` has to produce the document
+    /// end-to-end, over the filtered set this subcommand builds rather than the
+    /// whole corpus. Dispatch and rendering are tested in export.rs; what this
+    /// pins is that the two are wired together and reachable from the CLI.
+    #[test]
+    fn audit_writes_a_document_when_manifest_names_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("0x00000000000000000000000000000000000000ff");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut d = crate::model::ContractDetails::minimal(
+            "0x00000000000000000000000000000000000000ff",
+            1,
+        );
+        d.contract_name = Some("Sample".into());
+        d.is_verified = true;
+        std::fs::write(
+            dir.join("metadata.json"),
+            serde_json::to_string(&d).unwrap(),
+        )
+        .unwrap();
+
+        for (name, opener) in [("report.md", "# BlockScan audit report"), ("report.html", "<!doctype html>")] {
+            let out = tmp.path().join(name);
+            let mut g = cli(&["blockscan", "-o", tmp.path().to_str().unwrap(), "audit"]).global;
+            g.manifest = Some(out.clone());
+            run_audit(&g, &crate::cli::AuditArgs { by_risk: false }).unwrap();
+            let body = std::fs::read_to_string(&out).unwrap();
+            assert!(body.starts_with(opener), "{name}: {}", &body[..40.min(body.len())]);
+            assert!(body.contains("Sample"), "{name} must describe the contract");
+        }
+
+        // And the refusal reaches the CLI rather than writing JSON into a .pdf.
+        let pdf = tmp.path().join("report.pdf");
+        let mut g = cli(&["blockscan", "-o", tmp.path().to_str().unwrap(), "audit"]).global;
+        g.manifest = Some(pdf.clone());
+        assert!(run_audit(&g, &crate::cli::AuditArgs { by_risk: false }).is_err());
+        assert!(!pdf.exists());
     }
 
     #[test]

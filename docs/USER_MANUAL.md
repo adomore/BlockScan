@@ -310,7 +310,9 @@ blockscan mcp -o out --http 127.0.0.1:9000 \
   source/           # 已验证源码(多文件工程保留原始路径)
 ```
 - **续跑/去重**:已存在 `metadata.json` 默认跳过,`--overwrite` 强制重拉。
-- `--manifest <file.json|.csv>`:把全部已存合约导汇总;同目录另写 `clusters.json`(按去元数据字节码哈希聚类克隆族)。
+- `--manifest <file>`：按**扩展名**选格式。`.json` / `.csv` 是管道格式（扫描命令下同目录另写 `clusters.json`，按去元数据字节码哈希聚类克隆族）；`.md` / `.html` 是**给人读的报告**，含总览、严重度统计、每个合约的发现（位置 / 证据 / 修复建议）。HTML 是**单一自包含文件**（样式内联、无脚本、无外部请求），可直接当附件发出。
+  - 配合 `audit` 子命令时写的是**过滤后**的集合，即 `--min-risk` / `--only-vulnerable` / `--by-risk` 决定报告内容：`blockscan audit --only-vulnerable --manifest report.md`。
+  - **不产 PDF**：`.pdf` 会报错而非静默写成 JSON。需要 PDF 就拿 `.md` 或 `.html` 交给成熟管道（pandoc，或浏览器的打印为 PDF）。
 - `--table`:打印每合约的中文归一化表格(需 Blockscout 富化名称标签/项目URL/代币持仓时会调 Blockscout 免费 API)。
 - **多链** `--chains 1,10,8453,…`:每链 RPC 取自 `ETH_RPC_URL_<id>`(回退 `ETH_RPC_URL`);非主网/多链时输出按链名分子目录,避免同址跨链冲突。
 
@@ -337,7 +339,7 @@ blockscan mcp -o out --http 127.0.0.1:9000 \
 | `--no-audit` | false | 关闭安全审计 |
 | `--min-risk <0–100>` / `--only-vulnerable` | — | 审计过滤 |
 | `--suppress <file>` | — | 审计抑制配置 |
-| `--manifest <file>` | — | 导出 json/csv 汇总 + clusters.json |
+| `--manifest <file>` | — | 按扩展名：`.json`/`.csv` 汇总（+clusters.json）、`.md`/`.html` 报告文档、`.pdf` 拒绝 |
 | `--format human\|json\|ndjson\|sarif` | human | 输出格式 |
 | `-v` / `-vv` | — | 提高日志详细度(走 stderr) |
 
