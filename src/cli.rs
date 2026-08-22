@@ -196,9 +196,37 @@ pub enum Command {
     /// (offline; no network) and report risk scores + findings.
     Audit(AuditArgs),
 
+    /// Collect already-produced artefacts into a signed, verifiable bundle:
+    /// the files, an in-toto manifest of their digests and the chain state they
+    /// describe, and a detached signature over it.
+    Bundle(BundleArgs),
+
     /// Run a Model Context Protocol (MCP) server over stdio, exposing BlockScan's
     /// scan/audit/SARIF capabilities as agent-callable tools (JSON-RPC 2.0).
     Mcp(McpArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct BundleArgs {
+    /// Artefacts to attest to: files this tool already produced (a report, a
+    /// SARIF file, a manifest). They are copied in as-is; nothing is generated.
+    #[arg(required = true, value_name = "FILE")]
+    pub artefacts: Vec<PathBuf>,
+
+    /// Directory to assemble the bundle in (created if absent).
+    #[arg(long, value_name = "DIR")]
+    pub into: PathBuf,
+
+    /// Signing binary. The invocation is cosign's `sign-blob`; point this
+    /// elsewhere only for a binary that honours the same contract.
+    #[arg(long = "sign-with", default_value = "cosign", value_name = "PROGRAM")]
+    pub sign_with: String,
+
+    /// Assemble the bundle without signing it. The bundle then carries an
+    /// `UNSIGNED` file, because a recipient cannot tell an unsigned bundle from
+    /// one whose signature went missing.
+    #[arg(long, default_value_t = false)]
+    pub unsigned: bool,
 }
 
 #[derive(Args, Debug, Clone)]

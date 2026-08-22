@@ -3,6 +3,7 @@ pub mod alert;
 pub mod ast;
 pub mod audit;
 pub mod baseline;
+pub mod bundle;
 pub mod chains;
 pub mod cli;
 pub mod coingecko;
@@ -419,6 +420,10 @@ where
             run_audit(g, &args)?;
         }
 
+        Command::Bundle(args) => {
+            run_bundle(g, &args)?;
+        }
+
         Command::Mcp(args) => {
             // `-o`/--out becomes the default corpus dir for offline tools + resources.
             match &args.http {
@@ -438,6 +443,45 @@ where
         }
     }
 
+    Ok(())
+}
+
+/// Assemble a verifiable bundle over artefacts the tool already produced.
+///
+/// Offline: the chain state comes from the corpus under `--out`, which is where
+/// T-04 recorded it, and the artefacts come from disk. The only thing that
+/// leaves this process is the signer invocation.
+pub fn run_bundle(g: &GlobalArgs, args: &cli::BundleArgs) -> error::Result<()> {
+    let contracts = storage::load_all_metadata(&g.out);
+    let program = args.sign_with.clone();
+    let signer = move |manifest: &std::path::Path, sig: &std::path::Path| {
+        bundle::sign_blob(&program, manifest, sig)
+    };
+    let sign: Option<bundle::Signer<'_>> = if args.unsigned { None } else { Some(&signer) };
+
+    let r = bundle::write_bundle(&args.into, &args.artefacts, &contracts, sign)?;
+    let pins: Vec<String> = r
+        .pins
+        .iter()
+        .map(|p| format!("chain {} @ block {}", p.chain_id, p.block_number))
+        .collect();
+    tracing::info!(
+        "bundled {} artefact(s) into {} ({}; {})",
+        r.artefacts.len(),
+        r.dir.display(),
+        pins.join(", "),
+        if r.signed { "signed" } else { "UNSIGNED" }
+    );
+    if !r.signed {
+        tracing::warn!(
+            "this bundle is unattested. Sign it with: {}",
+            bundle::signing_command(
+                &args.sign_with,
+                &args.into.join(bundle::MANIFEST_NAME),
+                &args.into.join(bundle::SIGNATURE_NAME)
+            )
+        );
+    }
     Ok(())
 }
 

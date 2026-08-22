@@ -39,6 +39,13 @@ slang_solidity = "1.3.6"
 # started without one. Already in the tree transitively; named here because a
 # credential must not come from a non-cryptographic source.
 getrandom = "0.2"
+# T-13 bundle. `sha256` is what the supply-chain ecosystem verifies with, so a
+# bundle carrying only this project's native keccak256 would need bespoke
+# tooling to check — which is the thing the task forbids. Both are emitted.
+sha2 = "0.10"
+# A real run-time timestamp, RFC 3339. `now` only: no timezone database, since
+# the bundle records UTC and nothing else.
+chrono = { version = "0.4", default-features = false, features = ["now", "std"] }
 
 [dev-dependencies]
 wiremock = "0.6"

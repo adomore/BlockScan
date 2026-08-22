@@ -340,6 +340,7 @@ blockscan mcp -o out --http 127.0.0.1:9000 \
 | `--min-risk <0–100>` / `--only-vulnerable` | — | 审计过滤 |
 | `--suppress <file>` | — | 审计抑制配置 |
 | `audit --import <file>` | — | 并入外部分析器结果（SARIF / Slither JSON），可重复；不计入评分 |
+| `bundle --into <dir> <产物>...` | — | 把已产出的产物打成可验证包（in-toto 清单 + cosign 分离签名）；`--sign-with` 换签名器，`--unsigned` 不签 |
 | `--manifest <file>` | — | 按扩展名：`.json`/`.csv` 汇总（+clusters.json）、`.md`/`.html` 报告文档、`.pdf` 拒绝 |
 | `--format human\|json\|ndjson\|sarif` | human | 输出格式 |
 | `-v` / `-vv` | — | 提高日志详细度(走 stderr) |

@@ -340,6 +340,7 @@ In machine modes **stdout is data only** (pipe to `jq`); `monitor`/`watch` stdou
 | `--min-risk <0–100>` / `--only-vulnerable` | — | Audit filters |
 | `--suppress <file>` | — | Audit suppression config |
 | `audit --import <file>` | — | Merge another analyser's results (SARIF / Slither JSON), repeatable; excluded from scoring |
+| `bundle --into <dir> <artefact>...` | — | Bundle already-produced artefacts for verification (in-toto manifest + detached cosign signature); `--sign-with` picks the signer, `--unsigned` skips it |
 | `--manifest <file>` | — | By extension: `.json`/`.csv` summary (+clusters.json), `.md`/`.html` report document, `.pdf` refused |
 | `--format human\|json\|ndjson\|sarif` | human | Output format |
 | `-v` / `-vv` | — | Increase log verbosity (stderr) |
