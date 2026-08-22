@@ -68,9 +68,16 @@ async fn post_raw(
     req.push_str(body);
 
     let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
-    stream.write_all(req.as_bytes()).await.expect("write");
+    // Neither of these is checked, and both must not be. The body cap this file
+    // asserts is enforced by `Limited`, which stops reading partway through an
+    // oversized body: the server answers 413 and closes while the client still
+    // has the rest queued, so the write fails and a following RST can fail the
+    // read too — both are the guard working, not a transport fault. What
+    // matters is whether a response came back, and the status-line parse below
+    // still panics loudly when none did.
+    let _ = stream.write_all(req.as_bytes()).await;
     let mut resp = Vec::new();
-    stream.read_to_end(&mut resp).await.expect("read to EOF");
+    let _ = stream.read_to_end(&mut resp).await;
     let resp = String::from_utf8_lossy(&resp).into_owned();
 
     let status = resp
