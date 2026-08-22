@@ -201,8 +201,18 @@ pub struct McpArgs {
     #[arg(long, value_name = "ADDR")]
     pub http: Option<String>,
     /// Optional bearer token required on the `Authorization` header in HTTP mode.
+    /// When omitted, one is generated and printed to stderr at startup — the
+    /// surface is never served unauthenticated.
     #[arg(long, value_name = "TOKEN", env = "BLOCKSCAN_MCP_TOKEN")]
     pub http_token: Option<String>,
+    /// An RPC endpoint the `monitor_range` tool may dial. Repeatable.
+    ///
+    /// Without at least one, the tool refuses every request: the endpoint is an
+    /// operator decision made once at launch, not something a caller picks per
+    /// request. Matched whole, so a permitted `http://h:8545` does not admit
+    /// `http://h:8545.evil.example`.
+    #[arg(long = "rpc-allow", value_name = "URL")]
+    pub rpc_allow: Vec<String>,
 }
 
 #[derive(Args, Debug, Clone)]

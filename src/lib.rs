@@ -368,7 +368,15 @@ where
                 // stdio (default): stdout carries only JSON-RPC; logs go to stderr.
                 None => mcp::serve_stdio(g.out.clone()).await?,
                 // HTTP transport on a loopback address.
-                Some(addr) => mcp::serve_http(g.out.clone(), addr, args.http_token.clone()).await?,
+                Some(addr) => {
+                    mcp::serve_http(
+                        g.out.clone(),
+                        addr,
+                        args.http_token.clone(),
+                        args.rpc_allow.clone(),
+                    )
+                    .await?
+                }
             }
         }
     }

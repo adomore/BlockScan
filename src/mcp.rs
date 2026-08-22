@@ -28,12 +28,42 @@ const MAX_RANGE: u64 = 500;
 /// used as the default for the offline tools and as the source for `resources/*`.
 pub struct ServerCtx {
     pub out: std::path::PathBuf,
+    /// Endpoints `monitor_range` may dial, fixed when the server starts.
+    ///
+    /// Empty means the tool cannot reach anything: an operator who wants it
+    /// enables it, rather than a request choosing where this process sends its
+    /// next packet. A caller-chosen endpoint is a request-forgery primitive
+    /// pointed at whatever the host can route to.
+    pub rpc_allow: Vec<String>,
 }
 
 impl ServerCtx {
+    /// A context with no reachable endpoint. `monitor_range` refuses until an
+    /// allow-list is supplied through [`McpConfig`].
     pub fn new(out: std::path::PathBuf) -> Self {
-        Self { out }
+        Self { out, rpc_allow: Vec::new() }
     }
+
+    /// Whether `url` is one the operator permitted. Matched whole, after trimming
+    /// a trailing slash on both sides so `http://h:8545` and `http://h:8545/` are
+    /// the same endpoint; no prefix or substring matching, which would let
+    /// `http://good.example.evil` pass for `http://good.example`.
+    fn rpc_allowed(&self, url: &str) -> bool {
+        let norm = |u: &str| u.trim().trim_end_matches('/').to_ascii_lowercase();
+        let want = norm(url);
+        self.rpc_allow.iter().any(|a| norm(a) == want)
+    }
+}
+
+/// Everything the MCP server is given at launch.
+///
+/// Added by T-03 so the outbound allow-list has somewhere to live. The
+/// three-argument [`serve_http_on`] stays as a thin wrapper over this, because
+/// it is the shape the hardening spec drives the server with.
+pub struct McpConfig {
+    pub out: std::path::PathBuf,
+    pub token: Option<String>,
+    pub rpc_allow: Vec<String>,
 }
 
 // JSON-RPC 2.0 error codes.
@@ -92,10 +122,15 @@ const MAX_HTTP_BODY: usize = 1 << 20; // 1 MiB
 
 /// Serve MCP over HTTP on a loopback address (Streamable HTTP, JSON-only, stateless).
 /// Reuses the same `handle()` dispatch as stdio. Binds 127.0.0.1 only (never 0.0.0.0).
-pub async fn serve_http(out: std::path::PathBuf, addr: &str, token: Option<String>) -> error::Result<()> {
+pub async fn serve_http(
+    out: std::path::PathBuf,
+    addr: &str,
+    token: Option<String>,
+    rpc_allow: Vec<String>,
+) -> error::Result<()> {
     let socket = parse_loopback_addr(addr)?;
     let listener = tokio::net::TcpListener::bind(socket).await?;
-    serve_http_on(listener, out, token).await
+    serve_http_on_with(listener, McpConfig { out, token, rpc_allow }).await
 }
 
 /// Accept loop for the HTTP transport, given an already-bound listener. Splitting
@@ -108,6 +143,15 @@ pub async fn serve_http_on(
     out: std::path::PathBuf,
     token: Option<String>,
 ) -> error::Result<()> {
+    serve_http_on_with(listener, McpConfig { out, token, rpc_allow: Vec::new() }).await
+}
+
+/// [`serve_http_on`] with the full launch configuration.
+pub async fn serve_http_on_with(
+    listener: tokio::net::TcpListener,
+    cfg: McpConfig,
+) -> error::Result<()> {
+    let McpConfig { out, token, rpc_allow } = cfg;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
@@ -132,7 +176,7 @@ pub async fn serve_http_on(
         }
     };
     tracing::info!("blockscan MCP server: HTTP on http://{socket}/mcp (loopback only; Ctrl-C to stop)");
-    let ctx = std::sync::Arc::new(ServerCtx::new(out));
+    let ctx = std::sync::Arc::new(ServerCtx { out, rpc_allow });
     let token = std::sync::Arc::new(token);
 
     loop {
@@ -428,7 +472,7 @@ async fn call_tool(ctx: &ServerCtx, name: &str, args: &Value) -> ToolOutcome {
         "cluster_corpus" => tool_cluster_corpus(ctx, args),
         "scan_addresses" => tool_scan_addresses(ctx, args).await,
         "scan_block_range" => tool_scan_block_range(ctx, args).await,
-        "monitor_range" => tool_monitor_range(args).await,
+        "monitor_range" => tool_monitor_range(ctx, args).await,
         _ => ToolOutcome::UnknownTool,
     }
 }
@@ -892,10 +936,25 @@ async fn tool_scan_block_range(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
 /// Events-only monitor over a bounded range. COLLECTS alerts into the result —
 /// it must NOT reuse `scan_events_range` (which writes to stdout, the MCP channel).
 /// No Etherscan key needed (RPC `eth_getLogs` only).
-async fn tool_monitor_range(args: &Value) -> ToolOutcome {
+/// One message for every way the endpoint can fail to answer.
+///
+/// Refused, timed out, and "answered but not JSON-RPC" are three different
+/// facts about a host, and returning them separately turns this tool into a
+/// port scanner pointed at whatever the server can route to. The operator can
+/// still tell them apart in the log; the caller cannot.
+const RPC_UNREACHABLE: &str = "monitor_range: the RPC endpoint did not serve this request";
+
+async fn tool_monitor_range(ctx: &ServerCtx, args: &Value) -> ToolOutcome {
     let Some(rpc_url) = arg_str(args, "rpc_url") else {
         return ToolOutcome::BadArgs("monitor_range: missing 'rpc_url'".into());
     };
+    // Refuse before a socket is opened: a rejection that happens after the
+    // connection attempt still tells the caller what is listening.
+    if !ctx.rpc_allowed(rpc_url) {
+        return ToolOutcome::BadArgs(
+            "monitor_range: 'rpc_url' is not one of this server's permitted endpoints".into(),
+        );
+    }
     let (from, to) = match bounded_range(args) {
         Ok(r) => r,
         Err(e) => return ToolOutcome::BadArgs(format!("monitor_range: {e}")),
@@ -922,11 +981,17 @@ async fn tool_monitor_range(args: &Value) -> ToolOutcome {
 
     let rpc = match crate::rpc::RpcClient::new(rpc_url, 5) {
         Ok(r) => r,
-        Err(e) => return ToolOutcome::ToolError(e.to_string()),
+        Err(e) => {
+            tracing::warn!("monitor_range: client construction failed: {e}");
+            return ToolOutcome::ToolError(RPC_UNREACHABLE.into());
+        }
     };
     let (logs, failed) = match rpc.fetch_logs(from, to, topics, 2000, 4).await {
         Ok(x) => x,
-        Err(e) => return ToolOutcome::ToolError(e.to_string()),
+        Err(e) => {
+            tracing::warn!("monitor_range: fetch_logs failed: {e}");
+            return ToolOutcome::ToolError(RPC_UNREACHABLE.into());
+        }
     };
     let mut alerts: Vec<crate::model::Alert> = Vec::new();
     for log in &logs {
@@ -1009,6 +1074,17 @@ mod tests {
 
     async fn call(tool: &str, args: Value) -> Value {
         let r = handle(&ctx(), &req("tools/call", json!(1), json!({ "name": tool, "arguments": args }))).await;
+        r.expect("request gets a response")
+    }
+
+    /// Like [`call`], but with an operator-supplied RPC allow-list. Since T-03
+    /// `monitor_range` refuses any endpoint that is not on one.
+    async fn call_allow(allow: &[&str], tool: &str, args: Value) -> Value {
+        let ctx = ServerCtx {
+            out: std::path::PathBuf::from("output"),
+            rpc_allow: allow.iter().map(|s| (*s).to_string()).collect(),
+        };
+        let r = handle(&ctx, &req("tools/call", json!(1), json!({ "name": tool, "arguments": args }))).await;
         r.expect("request gets a response")
     }
 
@@ -1341,11 +1417,78 @@ mod tests {
 
     #[tokio::test]
     async fn monitor_range_bounded_validation() {
-        assert_eq!(call("monitor_range", json!({})).await["error"]["code"], INVALID_PARAMS); // no rpc_url
-        assert_eq!(call("monitor_range", json!({ "rpc_url": "http://x" })).await["error"]["code"], INVALID_PARAMS); // no from/to
-        assert_eq!(call("monitor_range", json!({ "rpc_url": "http://x", "from": 0, "to": 1000 })).await["error"]["code"], INVALID_PARAMS); // >MAX_RANGE
-        // Unparseable rpc_url -> RpcClient build fails -> tool error.
-        assert_eq!(call("monitor_range", json!({ "rpc_url": "not a url", "from": 1, "to": 1 })).await["result"]["isError"], true);
+        let allow = ["http://x"];
+        assert_eq!(call_allow(&allow, "monitor_range", json!({})).await["error"]["code"], INVALID_PARAMS); // no rpc_url
+        assert_eq!(call_allow(&allow, "monitor_range", json!({ "rpc_url": "http://x" })).await["error"]["code"], INVALID_PARAMS); // no from/to
+        assert_eq!(call_allow(&allow, "monitor_range", json!({ "rpc_url": "http://x", "from": 0, "to": 1000 })).await["error"]["code"], INVALID_PARAMS); // >MAX_RANGE
+        // Permitted but unusable -> a tool error, and never the reason why.
+        let r = call_allow(&["not a url"], "monitor_range", json!({ "rpc_url": "not a url", "from": 1, "to": 1 })).await;
+        assert_eq!(r["result"]["isError"], true);
+    }
+
+    // ---- T-03: the outbound endpoint is the operator's, not the caller's ----
+
+    #[tokio::test]
+    async fn an_endpoint_off_the_allow_list_is_refused() {
+        // The default context permits nothing, so the tool is inert until an
+        // operator turns it on.
+        let r = call("monitor_range", json!({ "rpc_url": "http://169.254.169.254/", "from": 1, "to": 2 })).await;
+        assert_eq!(r["error"]["code"], INVALID_PARAMS);
+        // And a list that permits something else still refuses this one.
+        let r = call_allow(&["http://rpc.internal:8545"], "monitor_range",
+                           json!({ "rpc_url": "http://169.254.169.254/", "from": 1, "to": 2 })).await;
+        assert_eq!(r["error"]["code"], INVALID_PARAMS);
+    }
+
+    #[test]
+    fn the_allow_list_matches_whole_endpoints() {
+        let ctx = ServerCtx {
+            out: std::path::PathBuf::from("output"),
+            rpc_allow: vec!["http://good.example:8545".into()],
+        };
+        assert!(ctx.rpc_allowed("http://good.example:8545"));
+        assert!(ctx.rpc_allowed("http://good.example:8545/"), "a trailing slash is the same endpoint");
+        assert!(ctx.rpc_allowed("HTTP://Good.Example:8545"), "scheme and host are case-insensitive");
+        // A prefix or substring match would admit all of these.
+        assert!(!ctx.rpc_allowed("http://good.example:8545.evil.test"));
+        assert!(!ctx.rpc_allowed("http://good.example:8545@evil.test"));
+        assert!(!ctx.rpc_allowed("http://evil.test/http://good.example:8545"));
+        assert!(!ctx.rpc_allowed("http://good.example:8546"));
+    }
+
+    #[tokio::test]
+    async fn transport_failures_are_indistinguishable_to_the_caller() {
+        // Two permitted endpoints that fail differently: one closed port, one
+        // live socket that answers with something that is not JSON-RPC.
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = dead.local_addr().unwrap();
+        drop(dead);
+        let alive = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let alive_addr = alive.local_addr().unwrap();
+        let alive_task = tokio::spawn(async move {
+            while let Ok((mut sock, _)) = alive.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\nnot json").await;
+            }
+        });
+
+        let dead_url = format!("http://{dead_addr}");
+        let alive_url = format!("http://{alive_addr}");
+        let allow = [dead_url.as_str(), alive_url.as_str()];
+        let refused = call_allow(&allow, "monitor_range", json!({ "rpc_url": dead_url, "from": 1, "to": 1 })).await;
+        let wrong_proto = call_allow(&allow, "monitor_range", json!({ "rpc_url": alive_url, "from": 1, "to": 1 })).await;
+        alive_task.abort();
+
+        assert_eq!(refused, wrong_proto,
+                   "a closed port and a live wrong-protocol endpoint must read identically");
+        // They agree because per-chunk failures fold into `incomplete` rather than
+        // surfacing a cause — the scan is reported as partial, not as a diagnosis.
+        assert_eq!(refused["result"]["structuredContent"]["counts"]["incomplete"], true);
+        // And nothing in the payload names the endpoint or how it failed.
+        let text = refused.to_string().to_ascii_lowercase();
+        for leak in ["refused", "timed out", "timeout", "connection", "os error", "127.0.0.1"] {
+            assert!(!text.contains(leak), "tool output leaks {leak:?}: {text}");
+        }
     }
 
     #[test]

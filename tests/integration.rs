@@ -1398,7 +1398,11 @@ async fn mcp_monitor_range_tool_collects_alerts_over_wiremock() {
             "from": 1, "to": 2, "rpc_url": rpc.uri(),
         }}
     });
-    let ctx = blockscan::mcp::ServerCtx::new(tmp.path().to_path_buf());
+    let ctx = blockscan::mcp::ServerCtx {
+        out: tmp.path().to_path_buf(),
+        // T-03: the endpoint is permitted at launch, not chosen per request.
+        rpc_allow: vec![rpc.uri()],
+    };
     let r = blockscan::mcp::handle(&ctx, &call).await.unwrap();
     assert_eq!(r["result"]["isError"], false, "resp: {r}");
     let sc = &r["result"]["structuredContent"];
@@ -1446,7 +1450,11 @@ async fn mcp_monitor_range_min_transfer_and_watchlist() {
     });
     Mock::given(method("POST")).respond_with(LogsEcho(json!([tx(500), tx(2000)]))).mount(&rpc).await;
     let tmp = tempfile::tempdir().unwrap();
-    let ctx = blockscan::mcp::ServerCtx::new(tmp.path().to_path_buf());
+    let ctx = blockscan::mcp::ServerCtx {
+        out: tmp.path().to_path_buf(),
+        // T-03: the endpoint is permitted at launch, not chosen per request.
+        rpc_allow: vec![rpc.uri()],
+    };
 
     // min_transfer 1000 -> only the 2000-value transfer survives.
     let call = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"monitor_range","arguments":{
@@ -1595,7 +1603,7 @@ async fn serve_http_wrapper_rejects_bad_and_busy_addrs() {
     let tmp = tempfile::tempdir().unwrap();
 
     // (1) Non-loopback addr -> refused by parse_loopback_addr; never reaches bind.
-    let r = blockscan::mcp::serve_http(tmp.path().to_path_buf(), "8.8.8.8:80", None).await;
+    let r = blockscan::mcp::serve_http(tmp.path().to_path_buf(), "8.8.8.8:80", None, Vec::new()).await;
     assert!(r.is_err(), "non-loopback addr must be refused by serve_http");
 
     // (2) Loopback addr whose port is already held -> the bind() inside serve_http
@@ -1605,7 +1613,7 @@ async fn serve_http_wrapper_rejects_bad_and_busy_addrs() {
     let busy = format!("127.0.0.1:{}", occupied.local_addr().unwrap().port());
     let r = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        blockscan::mcp::serve_http(tmp.path().to_path_buf(), &busy, None),
+        blockscan::mcp::serve_http(tmp.path().to_path_buf(), &busy, None, Vec::new()),
     )
     .await;
     assert!(!matches!(r, Ok(Ok(()))), "serve_http on an in-use port must not succeed: {r:?}");
