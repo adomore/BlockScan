@@ -219,18 +219,26 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 
 ## 代码量统计
 
-> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至 Phase 30)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
+> 精确统计(`#[cfg(test)]` 前为生产代码,之后为内联单测;截至 T-17 + 文档锁步事实层)。CI 每次推送自动复核测试/clippy/覆盖率三道门禁。
 
 | 类别 | 行数 | 备注 |
 |---|---|---|
-| **生产代码**(33 个 src 模块) | **10,401** | Top:`ast.rs` 2,036 · `audit.rs` 1,360 · `lib.rs` 1,315 · `mcp.rs` 905 · `rpc.rs` 497 · `scanner.rs` 444 · `cli.rs` 399 · `enrich.rs` 271 · `storage.rs` 259 · `model.rs` 226 |
-| **单元测试**(src 内联 `mod tests`) | **7,099** | 588 个用例,分布于各模块;Top:`ast.rs` 1,948 · `audit.rs` 761 · `mcp.rs` 442 · `storage.rs` 344 · `lib.rs` 308 · `scanner.rs` 301 |
-| **集成测试** `tests/integration.rs` | **3,198** | 105 个用例(wiremock mock RPC/Etherscan/Blockscout/Sourcify/GitHub/Google/website/DefiLlama/TokenList/CoinGecko + 真二进制断言,含 MCP stdio + 本地 HTTP 往返) |
+| **生产代码**(35 个 src 模块) | **12,594** | Top:`ast.rs` 2,036 · `audit.rs` 1,519 · `lib.rs` 1,476 · `mcp.rs` 1,070 · `export.rs` 715 · `rpc.rs` 634 · `scanner.rs` 503 · `cli.rs` 453 · `import.rs` 365 · `bundle.rs` 358 |
+| **单元测试**(src 内联 `mod tests`) | **8,650** | 667 个用例,分布于各模块;Top:`ast.rs` 1,948 · `audit.rs` 951 · `mcp.rs` 612 · `lib.rs` 540 · `rpc.rs` 472 · `export.rs` 371 |
+| **集成测试**(`tests/` 三个文件) | **4,445** | 131 个用例,分三个测试二进制 —— 见下表 |
 | examples(链上小工具) | 96 | `analyze` 39 · `log_scan` 37 · `resolve_proxy` 20 |
-| 文档(docs/*.md + README) | **2,500+** | 9 份域设计文档 + 中/英用户手册 + 本文;见下索引 |
+| 文档(docs/*.md + README) | **4,336** | 8 份域设计文档 + 任务清单 + 中/英用户手册 + 中/英新手指南 + 本文;见下索引 |
 
-- **生产 : 测试 ≈ 10,401 : 10,297**(单元 7,099 + 集成 3,198)≈ **1 : 0.99**。
-- **测试 693 个**(588 单元 + 105 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 ~97.8%**(区域 97.27%、函数 98.86%)——由 CI 的 `coverage` job **每次推送实测**、门禁设在 97%,非手工维护。此处只记百分比:精确行数每次提交都会微动,以最近一次 job 日志为准。
+集成测试按二进制拆分(每个文件是一个独立的 test binary,失败互不掩盖):
+
+| 文件 | 行数 | 用例 | 覆盖 |
+|---|---|---|---|
+| `tests/integration.rs` | 3,547 | 112 | wiremock mock RPC/Etherscan/Blockscout/Sourcify/GitHub/Google/website/DefiLlama/TokenList/CoinGecko + 真二进制断言,含 MCP stdio + 本地 HTTP 往返 |
+| `tests/mcp_hardening.rs` | 383 | 11 | MCP 的安全边界:HTTP 模式凭据强制(未给则自签)、错误 token 拒绝、`out` 参数的父级穿越与越界拒绝、RPC URL allow-list 在开 socket 前拒绝、Origin/body 守卫存活、传输失败对调用方不可区分 |
+| `tests/docs_lockstep.rs` | 515 | 8 | 三对镜像文档的**结构**(标题层级序列 + 围栏数)与**事实**(命令+flag 面、列表条目数、表格行×列、链接数);每层都有一个"制造漂移必须被抓到"的自检 |
+
+- **生产 : 测试 ≈ 12,594 : 13,095**(单元 8,650 + 集成 4,445)≈ **1 : 1.04**。
+- **测试 798 个**(667 单元 + 131 集成),`cargo clippy --all-targets` 零告警;**全工作区行覆盖 ~97.8%**(区域 97.27%、函数 98.86%)——由 CI 的 `coverage` job **每次推送实测**、门禁设在 97%,非手工维护。此处只记百分比:精确行数每次提交都会微动,以最近一次 job 日志为准。
   - 11 个模块 100%(`audit`/`model`/`events`/`group`/`suppress`/`baseline`/`report`/`sarif`/`config`/`chains`/`throttle`);`ast.rs` 97.00%、`mcp.rs` 97.54%。
   - 最大缺口是 **`lib.rs` 91.3%**(约占全工作区未覆盖行的四成)——watch/monitor 循环与多链 fan-out 的错误路径需真实链才能触达;其余为防御性 `?`/不可达的游标 API 守卫。
 
@@ -269,8 +277,8 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | 代理家族补齐 | 新增**标准前 zeppelinos 槽**（`keccak256("org.zeppelinos.proxy.implementation")`，无 EIP-1967 的“减一”推导）与 **EIP-2535 钻石**（无实现槽，只能问：`facetAddresses()` loupe 调用）。钻石探测每合约多一次 `eth_call`，故以**字节码是否含 DELEGATECALL** 为闸（复用已有的操作码扫描，零成本）；返回值严格解码（头偏移、长度与载荷一致、每词高 12 字节为零），因为被问的合约本就不知是否钻石、带 fallback 的合约会回答**某个东西** | TASKS T-07 ✅ |
 | 报告文档输出 | `--manifest` 按扩展名分发新增 `.md` / `.html`：总览 + 严重度（**出现次数**）+ 每合约发现（位置/证据/修复）。HTML 为单一自包含文件（样式内联、零脚本、零外部请求，由“文档内标签集必须是白名单子集”而非字串探针断言）。所有链上/浏览器来源的文本均视为敌对：HTML 全量转义，Markdown 用**自适应宽度的代码跨度**一次性中和全部构造。`.pdf` 显式拒绝并指向外部管道——不向二进制里加 PDF 写器 | TASKS T-14 ✅ |
 | 外部分析器结果导入 | `audit --import <file>`（可重复）读 SARIF 2.1.0 或 Slither JSON，**按形状识别**，归一化进现有 `SecurityFinding` 不扩字段（新增的只有 `source`）。**只读文件，从不执行任何进程**（由一个扫描本模块源码的测试看守）。归属先看路径里的地址段，再看整路径分量后缀唯一匹配；**多个合约都拥有的路径不猜**（记 ambiguous 并告警）。`overall_risk` / `summarize` / `build_sarif` 均只取 `source == blockscan`，因此导入无法移动评分、不会被 blockscan 的 SARIF 冒领；报告文档里两者**分列统计** | TASKS T-12 ✅ |
-| 双语文档锁步 | `tests/docs_lockstep.rs` 对三对镜像文档（README / USER_MANUAL / GETTING_STARTED）比对**标题层级序列 + 代码围栏数**，文字自由。围栏内容不参与解析，故 shell 示例里的 `# comment` 不会被当成标题。放在 `tests/` 而非 CI 脚本：在引入漂移的那台机器上就红，而 CI 无 `paths:` 过滤，纯文档变更同样跑 | TASKS T-15 ✅ |
-| 编译器下限 + 评分自描述 | `rust-version = "1.97.1"`（由 `slang_solidity` 1.3.8 及 metaslang 系列决定，非选择），CI 新增 `msrv` job **从 Cargo.toml 读取**该版本构建（不硬编码，否则第二份真相会静默漂移）。另：`AuditSummary.suppressed` 记录被抑制规则剔除的发现数——剔除发生在**评分之前**，所以分数是抑制文件的函数，不报出剔了多少就是不可审计的数。JSON（serde）、1SARIF（`runs[0].properties.suppressedFindings`）、`--table` 单元格、`audit` 人类行、以及 T-14 报告文档均会显示；为零时不显示 | TASKS T-16 ✅ |
+| 双语文档锁步（结构 + 事实） | `tests/docs_lockstep.rs` 对三对镜像文档（README / USER_MANUAL / GETTING_STARTED）比对两层。**结构层**：标题层级序列 + 代码围栏数，文字自由；围栏内容不参与解析，故 shell 示例里的 `# comment` 不会被当成标题。**事实层**（结构层通过后仍漏掉的那类漂移）：围栏内 `blockscan`/`cargo` 调用归约成的**命令 + 长 flag 面**、列表条目数、表格**行×列**、链接数。刻意不比：段落数（中文断句不同）、链接**目标**（锚点是翻译，各版本指向自己的镜像）、围栏内数字（示例输出本就该不同）。放在 `tests/` 而非 CI 脚本：在引入漂移的那台机器上就红，而 CI 无 `paths:` 过滤，纯文档变更同样跑 | TASKS T-15 ✅ |
+| 编译器下限 + 评分自描述 | `rust-version = "1.97.1"`（由 `slang_solidity` 1.3.8 及 metaslang 系列决定，非选择），CI 新增 `msrv` job **从 Cargo.toml 读取**该版本构建（不硬编码，否则第二份真相会静默漂移）。另：`AuditSummary.suppressed` 记录被抑制规则剔除的发现数——剔除发生在**评分之前**，所以分数是抑制文件的函数，不报出剔了多少就是不可审计的数。JSON（serde）、SARIF（`runs[0].properties.suppressedFindings`）、`--table` 单元格、`audit` 人类行、以及 T-14 报告文档均会显示；为零时不显示 | TASKS T-16 ✅ |
 | 错误中的响应体有界 | `etherscan.rs` 三处解析错误曾直接插入整个响应体。保留诊断价值（意外信封只能靠它看出来），但长度与字节都是**对方选的**：`clip_body` 限制到 512 字节并**显式标出截断与原始字节数**，控制字符转义（否则 body 里的换行会向日志写出一行伪造记录）。预算管的是**输出**而非输入：一个控制字节转义后最长 7 字符，管输入等于对恰好是恶意构造的 body 失去界 | TASKS T-17 ✅ |
 | 可验证结果包 | `blockscan bundle --into <dir> <产物>...`：把**已产出**的产物、一份清单、一份分离签名放进一个目录。三件事刻意不自己发明：**格式**用 in-toto Statement v1 + SLSA Provenance v1；**签名**外包给 `cosign sign-blob`（本 crate 不碰密钥，自制信任链比没有更糟，因为它看起来像）；**快照**必须来自 T-04 的区块固定——任一记录无 pin 则拒绝打包且**不创建目录**。摘要同时给 `sha256`（生态工具能核，实测与 `sha256sum` 逐字匹配）与 `keccak256`（本项目 idiom），时间戳为**运行时** RFC 3339（无编译期常量） | TASKS T-13 ✅ |
 | SARIF 输出 | SARIF 2.1.0 + `partialFingerprints`(GitHub Code Scanning 基线/去重) | AUDIT_DESIGN Phase 10 ✅ |
@@ -291,7 +299,8 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 
 | 模块 | 内容 | 依据 |
 |---|---|---|
-| **绑定图后续(Phase 28+)** | `resolve_decl_type` 的其余接收者形态(`IThing(addr).m()` / `payable(x).m()`);守卫按完整访问路径记录;同文件三元左值的既有不精确;修饰符调用解析(语料实测 0 次,优先级低) | AUDIT_DESIGN Phase 27「后续」 |
+| **绑定图后续(Phase 31+)** | `resolve_decl_type` 的其余接收者形态(`arr[i].m()` 语料 90 次 / `a.b.m()` 107 次 / `payable(x).m()`;`IThing(addr).m()` 已由 Phase 28 完成);守卫按**完整访问路径**记录;`ACCESS_MISSING_GUARD_PRIVILEGED_FN` 剩余 17 条(需「是否只写调用者自身状态」判据);SafeCast「先转换后 require 校验」惯用法;同文件三元左值的既有不精确;修饰符调用解析(语料实测 0 次,优先级低) | AUDIT_DESIGN Phase 30「后续」 |
+| **已知良品语料门禁** | `corpus/known_good.json` 的误报预算:8 个槽位目前**填 1**(WETH9,`pinned_block` 仍为 `PIN_ME` 占位),且**尚未接入 CI 或任何测试** —— 断言「每条目零 High/Critical,失败即挂构建」目前只是文件里的声明。填槽流程见 [../corpus/KNOWN_GOOD_HOWTO.md](../corpus/KNOWN_GOOD_HOWTO.md) | TASKS T-09 / T-10 🚧 |
 | 更多发现源 | CoinGecko/CMC · ethereum-lists · Sourcify 全量 · 4byte 聚类 · 工厂展开 · Dune | 见 📋 TODO |
 | WS `subscribe` 替代轮询;watch 下载模式多链 | 监控后续 | MONITOR_DESIGN「后续」 |
 
@@ -316,9 +325,11 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | [ANALYSIS_DESIGN.md](ANALYSIS_DESIGN.md) | 字节码静态分析 + 克隆聚类(批量1) | ✅ |
 | [OUTPUT_DESIGN.md](OUTPUT_DESIGN.md) | `--format` 机器输出 + manifest(批量2) | ✅ |
 | [DISCOVERY_DESIGN.md](DISCOVERY_DESIGN.md) | `discover` 多源发现 + 源选型 | ✅(部分源标 📋 待办) |
-| [AUDIT_DESIGN.md](AUDIT_DESIGN.md) | 安全审计引擎 Phase 8–30 ✅(标准化/深度规则/SARIF/抑制/SCWE-EthTrust/AST 精化/数据流/reentrancy/access-control/weak-randomness/ecrecover/arbitrary-delegatecall/transfer-send/收窄-cast/**绑定图 scope-aware 类型解析**/**delegatecall alias 回溯**) | ✅ |
+| [AUDIT_DESIGN.md](AUDIT_DESIGN.md) | 安全审计引擎 Phase 8–30 + T-06 ✅(标准化/深度规则/SARIF/抑制/SCWE-EthTrust/AST 精化/数据流/reentrancy/access-control/weak-randomness/ecrecover/arbitrary-delegatecall/transfer-send/收窄-cast/**绑定图 scope-aware 类型解析**/**delegatecall alias 回溯**) | ✅ |
 | [MONITOR_DESIGN.md](MONITOR_DESIGN.md) | 防御监控 批量3 + Phase 12–19(部署风险/去重/watch 实时/事件扩展+节流/分组 digest/周期 + 多链并行) | ✅ |
-| [MCP_DESIGN.md](MCP_DESIGN.md) | MCP 服务器 Phase 16/18/20(协议/工具集/resources/选型/stdio + 本地 HTTP 传输) | ✅ |
+| [MCP_DESIGN.md](MCP_DESIGN.md) | MCP 服务器 Phase 16/18/20(协议/工具集/resources/选型/stdio + 本地 HTTP 传输);安全边界的看守见 `tests/mcp_hardening.rs` | ✅ |
+| [TASKS.md](TASKS.md) | 外部审计任务清单 T-01…T-17(安全边界/可复现与可验证/检测精度/输出与工程约束) —— 状态矩阵里 `TASKS T-xx` 各行的出处 | ✅ 13/17 |
+| [../corpus/KNOWN_GOOD_HOWTO.md](../corpus/KNOWN_GOOD_HOWTO.md) | 误报预算语料 `corpus/known_good.json` 的填槽实操指南(T-09/T-10 的前置) | 🚧 8 槽填 1,门禁未接线 |
 
 > 流程约定(来自项目记忆):每加新功能 → 先更新对应域设计文档(此时阶段标题标 🔜/🚧 = 本期计划)→ 开发 → 功能 + 性能测试 100% 覆盖(不足须说明)→ 对抗式审查 → **把域设计文档的阶段标题标记翻成 ✅ 并更新其文首「状态:」行** → 回填本文「模块盘点」与「功能状态矩阵」。
 >

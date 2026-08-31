@@ -50,8 +50,8 @@ is now 13 tasks complete.
   chosen) with a CI job that builds against exactly it; the bilingual README pair is
   structurally checked in CI; parse errors no longer embed an unbounded response body.
 
-See the [Changelog](README.md#changelog) for the full list and [docs/](docs/) for
-per-domain design records.
+See the [Changelog](README.md#changelog) for the full list and
+[docs/](https://github.com/adomore/BlockScan/tree/main/docs) for per-domain design records.
 
 ## Artifacts
 
