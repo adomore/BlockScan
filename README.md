@@ -378,8 +378,8 @@ Integration tests use `wiremock` to mock RPC and Etherscan/Blockscout/Sourcify/G
 cargo llvm-cov --ignore-filename-regex 'main\.rs' --show-missing-lines
 ```
 
-Library code (`src/` minus `main.rs`) is at **97.76%** line coverage (regions 97.27%, functions 98.86%) — measured by the `coverage` job on every push and gated there at 97%, never maintained by hand. Only the percentage is recorded here: exact line counts shift with every commit, so that job's log is the source of truth. Per-module figures live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-The largest single gap is `lib.rs` at **91.3%** (roughly four in ten of all uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. `main.rs` is only an entry-point forwarder (parse args → init logging → call `run`); the logic lives in `lib.rs` and is fully tested, so it is excluded from the metric.
+Library code (`src/` minus `main.rs`) is at **97.25%** line coverage (regions 96.83%, functions 98.52%) — measured by the `coverage` job on every push and gated there at 97%, never maintained by hand. Only the percentage is recorded here: exact line counts shift with every commit, so that job's log is the source of truth. Per-module figures live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The largest single gap is `lib.rs` at **90.2%** (roughly four in ten of all uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. `main.rs` is only an entry-point forwarder (parse args → init logging → call `run`); the logic lives in `lib.rs` and is fully tested, so it is excluded from the metric.
 The rest are defensive branches that **cannot be triggered deterministically by tests that never touch the real network**. Each was reviewed by hand, and every one of them logs a warning and degrades gracefully (returns empty / skips):
 
 1. **Network I/O failure paths** — `resp.text().await` failing after a successful HTTP response, or a connection dropping mid-body (the fetch helpers in `website.rs` / `defillama.rs` / `tokenlist.rs`, and `rpc.rs` exhausting its retries);
