@@ -570,7 +570,10 @@ pub fn parse_facet_addresses(out: &[u8]) -> Vec<Address> {
         return Vec::new();
     }
     let mut facets = Vec::with_capacity(n);
-    for word in out[64..].chunks_exact(32) {
+    // `as_chunks` rather than `chunks_exact`: the length check above already
+    // established that the tail is exactly `n` words, so a type that cannot
+    // carry a remainder states the invariant instead of discarding it.
+    for word in out[64..].as_chunks::<32>().0 {
         match slot_word_to_address(U256::from_be_slice(word)) {
             Some(a) => facets.push(a),
             // A zero or dirty word is not an address; the whole list is suspect.
