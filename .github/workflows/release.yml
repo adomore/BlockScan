@@ -74,9 +74,7 @@ jobs:
           rm -rf "dist/$dir"
           # HEAD is the tag: checkout above resolved it. Archiving the commit
           # rather than the working tree keeps build output and anything
-          # untracked out of the source tarball. `release/SHA256SUMS` is
-          # export-ignored in .gitattributes — a checksum file inside an archive
-          # it describes has no consistent value.
+          # untracked out of the source tarball.
           git archive --format=tar.gz --prefix="blockscan-$VERSION/" HEAD \
             -o "dist/blockscan-$VERSION-src.tar.gz"
           ls -l dist
@@ -106,31 +104,9 @@ jobs:
               --title "BlockScan $TAG" --notes-file RELEASE_NOTES.md
           fi
 
-      # The manifest the repository tracks is a record of the last release. It
-      # cannot be written before the archives exist, so it necessarily lands
-      # after the tag — which is why this commits onto main rather than onto the
-      # tag this job checked out. Committing onto the detached tag would push a
-      # non-fast-forward the moment main had moved on.
-      #
-      # Delete this step and `release/SHA256SUMS` together if CI writing to main
-      # is unwelcome: the release asset is the authoritative copy, and an
-      # unmaintained second one is what drifted in the first place.
-      - name: Record the manifest in the repository
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          set -euo pipefail
-          git fetch --depth=1 origin main
-          git checkout -B release-manifest FETCH_HEAD
-          cp dist/SHA256SUMS release/SHA256SUMS
-          if git diff --quiet -- release/SHA256SUMS; then
-            echo "manifest already current"
-            exit 0
-          fi
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add release/SHA256SUMS
-          git commit \
-            -m "Record the $TAG checksums" \
-            -m "Written by the release workflow from the archives it built and published; the release asset is the authoritative copy."
-          git push origin HEAD:main
+      # The manifest is deliberately not written back into the repository. A
+      # tracked copy cannot be produced before the archives it describes exist,
+      # so it would always land after the tag and always describe the previous
+      # release until something updated it — which is the drift this workflow
+      # was added to end. The release asset is the only copy, and it is
+      # generated from, and verified against, the archives beside it.
