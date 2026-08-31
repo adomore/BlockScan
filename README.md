@@ -1,10 +1,10 @@
 # BlockScan
 
-[English](README.md) · [简体中文](README.zh-CN.md)
+**English** · [简体中文](README.zh-CN.md)
 
 Scan smart contracts on Ethereum (and EVM-compatible chains): download **verified source**, **on-chain bytecode**, and **contract details**, save them per-contract, and automatically **discover** a project's related contracts. Written in Rust.
 
-> Status: **1.0 stable** — feature-complete, **637 tests green, zero clippy warnings**, core paths verified against real chains.
+> Status: **1.1.0 stable** — feature-complete, **798 tests green, zero clippy warnings**, core paths verified against real chains.
 >
 > New here? Start with the **Getting Started guide: [English](docs/GETTING_STARTED.en.md) · [中文](docs/GETTING_STARTED.md)** (install → configure → first scan in ~10 min).
 > User manual: **[English](docs/USER_MANUAL.en.md)** · **[中文](docs/USER_MANUAL.md)**; architecture / module inventory / LOC / feature-status matrix in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** (top-level design doc).
@@ -163,6 +163,8 @@ At least one source is required, or `discover` errors with the list of available
 $env:GOOGLE_API_KEY = "AIza..."
 $env:GOOGLE_CSE_ID  = "xxxxxxx:yyyy"
 blockscan discover "Uniswap V4"          # the name goes to both Blockscout + Google
+# or pass them explicitly:
+blockscan discover "Uniswap V4" --google-api-key AIza... --google-cse-id xxxx
 ```
 
 ### Enrichment table (`--table`)
@@ -214,6 +216,9 @@ A **standalone, standardized audit engine** (module `audit`) that detects vulner
 blockscan addresses --file addrs.txt --only-vulnerable --format json -o out \
   | jq -r '.contracts[] | "\(.audit.grade) \(.audit.risk_score) \(.address)"'
 
+# Only contracts scoring >= 40
+blockscan range --from 19000000 --to 19000050 --min-risk 40 -o out
+
 # Offline re-audit of an already-downloaded corpus (re-score after rule upgrades), sorted by risk
 blockscan audit --by-risk -o out
 
@@ -249,14 +254,16 @@ cargo run --release --example analyze -- 24000 100000   # CPU probe: 24KB ≈ 0.
 
 Scans a block range for **security-relevant events**, decodes them into structured alerts, and lands them in `alerts.jsonl` / webhook / stdout — turning on-chain "proxy upgrades, ownership/admin changes" into a consumable threat-intel stream (cron-friendly).
 
-| Event | Meaning |
-|---|---|
-| `Upgraded` / `BeaconUpgraded` | proxy implementation/beacon upgraded |
-| `OwnershipTransferred` | ownership transferred |
-| `AdminChanged` | proxy admin changed |
-| `RoleGranted` / `RoleRevoked` | AccessControl role granted/revoked |
-| `Paused` / `Unpaused` | Pausable emergency pause/resume |
-| `Transfer` (large, opt-in) | ERC-20 transfer ≥ `--min-transfer` |
+| Event | Meaning | Decoded fields |
+|---|---|---|
+| `Upgraded` / `BeaconUpgraded` | proxy implementation/beacon upgraded | `new_value`=new implementation |
+| `OwnershipTransferred` | ownership transferred | `previous`/`new_value`=old/new owner |
+| `AdminChanged` | proxy admin changed | `previous`/`new_value`=old/new admin |
+| `RoleGranted` / `RoleRevoked` | AccessControl role granted/revoked | `new_value`=account, `previous`=sender |
+| `Paused` / `Unpaused` | Pausable emergency pause/resume | `new_value`=account |
+| `Transfer` (large, opt-in) | ERC-20 transfer ≥ `--min-transfer` | `previous`=from, `new_value`=to, `amount`=value |
+
+The 8 above are the default security event set; `Transfer` is high-volume and is only included when `--min-transfer <raw smallest unit>` is given, filtered by that threshold (ERC-721 is excluded automatically).
 
 ```bash
 # Monitor a recent range for upgrades/ownership changes → alerts.jsonl + webhook
@@ -267,14 +274,26 @@ blockscan monitor --from 25417000 --to 25417200 \
 blockscan monitor --from 25417000 --to 25417200 --audit-deployments --min-risk 50 \
   --alerts alerts.jsonl -o out
 
+# Watch only your own contracts (one address per line), and pull out every new implementation with jq
+blockscan monitor --from 25417000 --to 25417200 --watchlist mycontracts.txt -o out \
+  | jq -r 'select(.kind=="proxy-upgrade") | "\(.contract) -> \(.new_value)"'
+
 # Cross-run dedup: re-run the same range periodically; --baseline records seen fingerprints
 blockscan monitor --from 25417000 --to 25417200 --baseline seen.fp --alerts alerts.jsonl -o out
+
+# Large-transfer monitoring + throttle: only transfers >= 1,000,000 (raw unit), at most 5 per contract
+blockscan monitor --from 25417000 --to 25417200 --min-transfer 1000000 --throttle 5 \
+  --watchlist mytokens.txt --alerts alerts.jsonl -o out
 ```
 
-- **`--audit-deployments`**: full audit of each new deployment; alerts `kind:"risky-deployment"` when `risk_score > 0 && ≥ --min-risk`. Needs an Etherscan key; mutually exclusive with `--no-audit`.
-- **`--baseline <file>`**: cross-run dedup via a stable `chain|block|contract|event|tx_hash|log_index|…` fingerprint.
-- **`--min-transfer <amount>`** / **`--throttle <N>`** / **`--group`**: large-transfer monitoring (opt-in), per-`(chain,contract,kind)` burst cap, and folding high-frequency alerts into an end-of-run digest, respectively.
-- **stdout** is a per-alert JSON stream; `--alerts` appends; `--webhook-url` is best-effort POST; any sink failure only `warn!`s — the monitor loop never aborts.
+- **`--audit-deployments`**: full audit of each contract newly deployed in the range; alerts `kind:"risky-deployment"` (carrying `risk_score`/`grade`) when `risk_score > 0 && ≥ --min-risk` — turning "who just deployed something dangerous" into a cron-able intel stream. Needs an Etherscan key (to fetch source); mutually exclusive with `--no-audit`.
+- **`--baseline <file>`**: cross-run alert dedup. Each alert gets a stable `chain|block|contract|event|tx_hash|log_index|…` fingerprint; already-recorded ones are suppressed, new ones fire and are appended to the file, so overlapping ranges and periodic re-runs stop re-alerting. The summary line reports `(N suppressed)`.
+- **`--min-transfer <amount>`**: brings ERC-20 `Transfer` into scope, alerting `large-transfer` only when `value ≥ amount` (raw uint256 smallest unit; ERC-721 excluded automatically). High-volume — pair it with `--watchlist`.
+- **`--throttle <N>`**: burst cap per `(chain, contract, kind)` — at most N per run, the rest dropped (summary reports `(M throttled)`); throttled alerts are not written to the baseline, so a later run can still emit them.
+- **`--group`**: folds multiple alerts sharing `(chain, contract, event)` into **one end-of-run digest** (`event:"Grouped"`, `amount`=count, `previous`="blocks first..last"; risky digests keep the highest risk/grade) instead of `--throttle`'s hard drop. Given both, group wins and throttle is ignored with a warning.
+- **`--alert-topic 0x..`** (repeatable): adds custom topic0 hashes beyond the built-in security set; ones without a dedicated decoder are recorded as `contract` + `event=unknown`.
+- **stdout** is a per-alert JSON stream (pipe-safe); `--alerts <file>` appends; `--webhook-url` is best-effort POST; any sink failure only `warn!`s — the monitor loop never aborts.
+- `--log-chunk` / `--log-concurrency` work as they do for discovery's log scan; `--chains` is supported for multichain.
 
 ### Real-time alerting (`watch --alert-on-risk` / `--alert-events`)
 
@@ -289,8 +308,10 @@ blockscan watch --alert-on-risk --alert-events --min-risk 50 \
 blockscan watch --alert-events --webhook-url https://hooks.example.com/x
 ```
 
-- **`--chains` (alert mode only)**: multichain **parallel** watch (per-chain RPC from `ETH_RPC_URL_<id>`); independent dedup/throttle/group per chain, a single Ctrl-C stops all.
-- A block whose logs/receipts fail to fetch **does not advance** — the next tick re-scans (with `--baseline` dedup), never silently skipping.
+- **`--alert-on-risk`**: audits each new deployment and alerts `risky-deployment` at `risk ≥ --min-risk` (needs a key). **`--alert-events`**: decodes security events into alerts (pure RPC, no key). Either or both.
+- **`--digest-interval <secs>`** (with `--group`): flush group digests every N seconds, not only at shutdown.
+- **`--chains 1,10,…`** (alert mode only): multichain **parallel** watch (per-chain RPC from `ETH_RPC_URL_<id>`); independent dedup/throttle/group per chain, a single Ctrl-C stops all, summaries merge. Download mode is still single-chain.
+- A block whose logs/receipts fail to fetch **does not advance** — the next tick re-scans (with `--baseline` dedup), never silently skipping; `--confirmations` trails the head to avoid reorgs.
 
 ## Machine-readable output (`--format`)
 
@@ -306,6 +327,9 @@ blockscan watch --alert-events --webhook-url https://hooks.example.com/x
 ```bash
 blockscan addresses --file addrs.txt --format json -o out \
   | jq -r '.contracts[] | select(.analysis.interfaces|index("ERC-20")) | .address'
+
+# Streaming ndjson: process as it scans (constant memory)
+blockscan range --from 19000000 --to 19000010 --format ndjson -o out > stream.ndjson
 ```
 
 ## MCP server (`blockscan mcp`)
@@ -344,7 +368,7 @@ Also exposes **resources**: `resources/list` lists each saved contract as `block
 ## Tests
 
 ```bash
-cargo test                 # 693 tests: 588 unit + 105 integration
+cargo test                 # 798 tests: 667 unit + 131 integration
 cargo clippy --all-targets # zero warnings
 ```
 
@@ -354,9 +378,13 @@ Integration tests use `wiremock` to mock RPC and Etherscan/Blockscout/Sourcify/G
 cargo llvm-cov --ignore-filename-regex 'main\.rs' --show-missing-lines
 ```
 
-Workspace line coverage **97.76%** (regions 97.27%, functions 98.86%) — measured by the `coverage` job on every push and gated there at 97%, never maintained by hand. Only the percentage is recorded here: exact line counts shift with every commit, so that job's log is the source of truth.
-`audit.rs`, `model.rs`, `events.rs`, `group.rs`, `suppress.rs`, `baseline.rs`, `report.rs`, `sarif.rs`, `config.rs`, `chains.rs` and `throttle.rs` are at 100%; `ast.rs` 97.00%, `mcp.rs` 97.54%.
-The largest single gap is `lib.rs` at **91.3%** (roughly four in ten of all uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. The rest are defensive `?`/unreachable cursor-API guards.
+Library code (`src/` minus `main.rs`) is at **97.76%** line coverage (regions 97.27%, functions 98.86%) — measured by the `coverage` job on every push and gated there at 97%, never maintained by hand. Only the percentage is recorded here: exact line counts shift with every commit, so that job's log is the source of truth. Per-module figures live in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+The largest single gap is `lib.rs` at **91.3%** (roughly four in ten of all uncovered lines) — the watch/monitor loops and multichain fan-out, whose error paths need a live chain to reach. `main.rs` is only an entry-point forwarder (parse args → init logging → call `run`); the logic lives in `lib.rs` and is fully tested, so it is excluded from the metric.
+The rest are defensive branches that **cannot be triggered deterministically by tests that never touch the real network**. Each was reviewed by hand, and every one of them logs a warning and degrades gracefully (returns empty / skips):
+
+1. **Network I/O failure paths** — `resp.text().await` failing after a successful HTTP response, or a connection dropping mid-body (the fetch helpers in `website.rs` / `defillama.rs` / `tokenlist.rs`, and `rpc.rs` exhausting its retries);
+2. **Multichain orchestration branches** — warnings and skips reachable only on a real multichain run, or when one chain's RPC is missing (several lines in `lib.rs`);
+3. **`?` propagation on in-memory serialization/writes that do not actually fail.**
 
 ## Factory discovery (`--trace`)
 
@@ -373,8 +401,9 @@ blockscan watch --trace
 ## Known limitations
 
 - Source comes from Etherscan, falling back to Sourcify when unverified; with neither, only bytecode + available metadata are saved.
-- `discover` web search uses Google Custom Search (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`, 100/day free).
+- `discover` web search uses Google Custom Search (needs `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`, 100/day free); the GitHub source parses hardhat-deploy / Foundry deployment artifacts and extracts addresses + explorer links from `README.md` / `*scope*.md` (audit scope).
 - Multichain RPCs are provided per chain via `ETH_RPC_URL_<id>`; single-chain uses `--rpc-url`.
+- CSV manifests prefix any field starting with `= + - @` (or tab / CR) with `'`, so a spreadsheet treats it as text rather than a formula.
 - Human-mode stdout uses standard prints; a closed downstream pipe can surface as an I/O error (the tool's primary output is the filesystem).
 - The audit engine is a heuristic linter — a triage signal, not a verifier. Review findings.
 
