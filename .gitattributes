@@ -1,3 +1,9 @@
 # Store text as LF in the repository, check out native on each platform.
 # Matters here because CI runs the suite on both windows-latest and ubuntu-latest.
 * text=auto
+
+# `git archive` builds the source tarball for a release, and that tarball is one of
+# the files SHA256SUMS lists. Shipping the checksum file inside an archive it
+# describes cannot be made consistent -- writing the hash changes the tarball.
+# The authoritative copy is the release asset.
+release/SHA256SUMS export-ignore

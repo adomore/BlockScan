@@ -9,7 +9,7 @@ Two strands since 1.0.0: eight phases deepening the audit engine's precision thr
 slang binding graph, and an external source-and-documentation audit whose 17-task manifest
 is now 13 tasks complete.
 
-- **794 tests green** (667 unit + 112 integration + 11 MCP hardening + 4 docs lockstep) ·
+- **798 tests green** (667 unit + 112 integration + 11 MCP hardening + 8 docs lockstep) ·
   `cargo clippy --all-targets` zero warnings · workspace line coverage gated at 97%.
 - Every corpus figure below was measured against the committed 42-contract corpus, not estimated.
 
@@ -47,8 +47,15 @@ is now 13 tasks complete.
   how many findings suppression removed from it; `import.rs` normalises another analyser's
   results into the same shape without touching the score or inventing fields it cannot know.
 - **Declared constraints.** `rust-version = "1.97.1"` (inherited from `slang_solidity`, not
-  chosen) with a CI job that builds against exactly it; the bilingual README pair is
-  structurally checked in CI; parse errors no longer embed an unbounded response body.
+  chosen) with a CI job that builds against exactly it; parse errors no longer embed an
+  unbounded response body.
+- **The bilingual pair is checked on fact, not only shape.** The structural rule (heading
+  levels, fence count) stayed green while the README pair disagreed on the test count in
+  one fence, carried "a triage signal, not a verifier" in English only, documented four
+  `monitor` flags in Chinese only, and gave the events table a third column on one side.
+  A second family of assertions now compares the command-and-flag surface demonstrated in
+  fences, list-item counts, table shape including columns, and link counts. Paragraph
+  counts and link targets stay free: those are translation.
 
 See the [Changelog](README.md#changelog) for the full list and
 [docs/](https://github.com/adomore/BlockScan/tree/main/docs) for per-domain design records.
