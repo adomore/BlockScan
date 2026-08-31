@@ -1,0 +1,136 @@
+name: Release
+
+# Cutting a release by hand is what let the checksum manifest drift: the
+# archives were built on someone's machine, the hashes were transcribed, and
+# nothing afterwards could tell whether the file described the bytes people
+# actually downloaded. This job builds the archives, hashes what it just built,
+# and publishes both in one step, so the manifest cannot describe anything else.
+#
+# Trigger is a tag push. `ci.yml` runs on `push: branches: [main]`, which a tag
+# push does not match — so this job is the only gate at release time and repeats
+# the test and clippy gates rather than assuming main was green.
+on:
+  push:
+    tags: ['v*']
+  # Lets a failed publish be retried against an existing tag without re-tagging.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish (e.g. v1.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build, checksum, publish
+    # Windows because the published binary is x86_64-pc-windows-msvc, which is
+    # what README documents and what the project is developed against.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # A tag that disagrees with the manifest produces archives named for one
+      # version containing a binary that reports another. Checked before
+      # anything is built, so the failure costs seconds rather than a bad
+      # release someone has to delete.
+      - name: Tag and Cargo.toml must agree
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${tag#v}"
+          manifest=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "$version" != "$manifest" ]; then
+            echo "::error::tag $tag implies $version, Cargo.toml declares $manifest"
+            exit 1
+          fi
+          echo "TAG=$tag"        >> "$GITHUB_ENV"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      # The same two gates ci.yml applies. A release is the one build nobody
+      # gets to re-run after the fact.
+      - run: cargo test --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+      - run: cargo build --release --locked
+
+      - name: Assemble the archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="blockscan-$VERSION-x86_64-pc-windows-msvc"
+          mkdir -p "dist/$dir"
+          cp target/release/blockscan.exe README.md LICENSE RELEASE_NOTES.md "dist/$dir/"
+          tar czf "dist/$dir.tar.gz" -C dist "$dir"
+          rm -rf "dist/$dir"
+          # HEAD is the tag: checkout above resolved it. Archiving the commit
+          # rather than the working tree keeps build output and anything
+          # untracked out of the source tarball. `release/SHA256SUMS` is
+          # export-ignored in .gitattributes — a checksum file inside an archive
+          # it describes has no consistent value.
+          git archive --format=tar.gz --prefix="blockscan-$VERSION/" HEAD \
+            -o "dist/blockscan-$VERSION-src.tar.gz"
+          ls -l dist
+
+      - name: Hash what was just built
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -b ./*.tar.gz | sed 's| \*\./| *|' > SHA256SUMS
+          # Verifying here means a broken manifest fails the release instead of
+          # reaching a user who runs the same command and is told to distrust a
+          # good download.
+          sha256sum -c SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.tar.gz dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+              --title "BlockScan $TAG" --notes-file RELEASE_NOTES.md
+          fi
+
+      # The manifest the repository tracks is a record of the last release. It
+      # cannot be written before the archives exist, so it necessarily lands
+      # after the tag — which is why this commits onto main rather than onto the
+      # tag this job checked out. Committing onto the detached tag would push a
+      # non-fast-forward the moment main had moved on.
+      #
+      # Delete this step and `release/SHA256SUMS` together if CI writing to main
+      # is unwelcome: the release asset is the authoritative copy, and an
+      # unmaintained second one is what drifted in the first place.
+      - name: Record the manifest in the repository
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin main
+          git checkout -B release-manifest FETCH_HEAD
+          cp dist/SHA256SUMS release/SHA256SUMS
+          if git diff --quiet -- release/SHA256SUMS; then
+            echo "manifest already current"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add release/SHA256SUMS
+          git commit \
+            -m "Record the $TAG checksums" \
+            -m "Written by the release workflow from the archives it built and published; the release asset is the authoritative copy."
+          git push origin HEAD:main

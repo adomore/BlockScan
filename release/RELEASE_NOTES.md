@@ -64,10 +64,9 @@ See the [Changelog](README.md#changelog) for the full list and
 
 | File | Contents |
 |---|---|
-| `blockscan.zip` | the prebuilt `blockscan.exe` (x86_64-pc-windows-msvc) |
 | `blockscan-1.1.0-x86_64-pc-windows-msvc.tar.gz` | `blockscan.exe` + `README.md` + `LICENSE` + `RELEASE_NOTES.md` |
-| `blockscan-1.1.0-src.tar.gz` | full source tree (build with `cargo build --release`) |
-| `SHA256SUMS` | SHA-256 checksums for the archives above |
+| `blockscan-1.1.0-src.tar.gz` | the source tree at the tag (build with `cargo build --release`) |
+| `SHA256SUMS` | SHA-256 checksums for the two archives above, produced by the release workflow from the archives it built |
 
 ## Install (prebuilt binary)
 

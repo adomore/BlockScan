@@ -411,10 +411,11 @@ blockscan watch --trace
 
 Tagged releases attach a prebuilt Windows binary on the GitHub **Releases** page:
 
-- `blockscan.zip` — contains `blockscan.exe` (x86_64-pc-windows-msvc).
 - `blockscan-<version>-x86_64-pc-windows-msvc.tar.gz` — the binary bundled with `README.md`, `LICENSE`, and `RELEASE_NOTES.md`.
+- `blockscan-<version>-src.tar.gz` — the source tree at the tag (build with `cargo build --release`).
 - `SHA256SUMS` — SHA-256 checksums for every release artifact (verify with `sha256sum -c SHA256SUMS`, or PowerShell `Get-FileHash`).
-- `RELEASE_NOTES.md` — notes for the release.
+
+Both archives and the manifest are built and published by the `Release` workflow on a tag push, which hashes the archives it has just built — the release notes are the release description itself.
 
 ## Changelog
 

@@ -446,10 +446,11 @@ blockscan watch --trace
 
 打了 tag 的版本会在 GitHub **Releases** 页附上预编译的 Windows 二进制：
 
-- `blockscan.zip` —— 内含 `blockscan.exe`（x86_64-pc-windows-msvc）。
 - `blockscan-<version>-x86_64-pc-windows-msvc.tar.gz` —— 二进制与 `README.md`、`LICENSE`、`RELEASE_NOTES.md` 打包。
+- `blockscan-<version>-src.tar.gz` —— 该 tag 上的源码树（用 `cargo build --release` 自行构建）。
 - `SHA256SUMS` —— 每个发布产物的 SHA-256 校验和（用 `sha256sum -c SHA256SUMS` 校验，PowerShell 用 `Get-FileHash`）。
-- `RELEASE_NOTES.md` —— 该版本的发布说明。
+
+两个归档与校验清单都由 `Release` workflow 在打 tag 时构建并发布，清单里的哈希算的就是它刚刚构建出来的那些文件 —— 发布说明即 release 正文本身。
 
 ## 更新记录（Changelog）
 
