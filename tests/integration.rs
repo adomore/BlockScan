@@ -1905,15 +1905,39 @@ async fn serve_http_in_process_dispatches_and_covers_accept_loop() {
 
     // Regression (review HIGH): an oversize streaming body is rejected with 413,
     // not buffered unbounded (Limited stops the read at the cap).
-    let mut s2 = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    //
+    // Read concurrently with the write rather than after it. The server answers
+    // 413 and closes as soon as the cap is hit, while this client still has ~1 MiB
+    // left to send; closing a socket that still has unread data queued sends RST
+    // rather than FIN, and an RST discards whatever the peer has already buffered
+    // — including the response that had arrived. Writing first and reading second
+    // therefore fails intermittently, with an empty body, under load. Draining the
+    // socket as bytes arrive removes the window instead of widening a timeout.
+    let s2 = tokio::net::TcpStream::connect(&addr).await.unwrap();
     let big = 2 * 1024 * 1024; // > MAX_HTTP_BODY (1 MiB)
     let head = format!(
         "POST /mcp HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer it-token\r\nContent-Length: {big}\r\nConnection: close\r\n\r\n"
     );
-    s2.write_all(head.as_bytes()).await.unwrap();
-    let _ = s2.write_all(&vec![b'x'; big]).await; // server may close early -> ignore write error
-    let mut resp2 = String::new();
-    let _ = s2.read_to_string(&mut resp2).await;
+    let (mut rd, mut wr) = s2.into_split();
+    let reader = tokio::spawn(async move {
+        // Accumulate explicitly: on a reset `read_to_end` reports an error and
+        // leaves the buffer's contents unspecified, which is the very byte range
+        // being asserted on.
+        let mut got = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match rd.read(&mut buf).await {
+                Ok(0) => break,                              // clean EOF
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+                Err(_) => break,                             // reset after the response
+            }
+        }
+        String::from_utf8_lossy(&got).into_owned()
+    });
+    wr.write_all(head.as_bytes()).await.unwrap();
+    let _ = wr.write_all(&vec![b'x'; big]).await; // server may close early -> ignore write error
+    drop(wr);
+    let resp2 = reader.await.unwrap();
     handle.abort();
     assert!(resp2.starts_with("HTTP/1.1 413"), "oversize body must be 413: {resp2:?}");
 }
