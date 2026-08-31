@@ -41,7 +41,7 @@ BlockScan 是一个 Rust 命令行工具,用于**发现以太坊(及兼容 EVM �
 ```bash
 # 构建(Windows 上需 MSVC 工具链;见下方注意)
 cargo build --release        # 产物:target/release/blockscan
-cargo test                   # 637 个用例全绿(532 单元 + 105 集成)
+cargo test                   # 798 个用例全绿(667 单元 + 131 集成)
 cargo clippy --all-targets   # 零告警
 ```
 

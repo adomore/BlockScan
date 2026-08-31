@@ -4,7 +4,7 @@
 
 扫描以太坊（及兼容 EVM 链）上的智能合约，下载**已验证源码**、**链上字节码**与**合约详情**，按合约落盘保存；并能按项目自动**发现**相关合约。Rust 实现。
 
-> 状态：**1.0 正式版** —— 功能完整、**637 个测试全绿、clippy 零告警**、核心路径均经真实链上验证。
+> 状态：**1.1.0 正式版** —— 功能完整、**798 个测试全绿、clippy 零告警**、核心路径均经真实链上验证。
 >
 > 新手请先读 **新手指南:[中文](docs/GETTING_STARTED.md) · [English](docs/GETTING_STARTED.en.md)**(约 10 分钟:安装 → 配置 → 扫到第一个合约)。
 > 用户手册:**[中文](docs/USER_MANUAL.md)** · **[English](docs/USER_MANUAL.en.md)**;架构 / 模块盘点 / 代码量 / 功能状态矩阵见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**(顶层开发设计文档)。
@@ -34,6 +34,8 @@
 ```bash
 cargo build --release
 ```
+
+已打标签的版本会在 GitHub **Releases** 页附上预编译二进制（见[版本发布](#版本发布)）。
 
 ## 配置
 
@@ -392,10 +394,7 @@ blockscan mcp --http 127.0.0.1:9000 --http-token "$BLOCKSCAN_MCP_TOKEN"   # 加 
 ## 测试
 
 ```bash
-cargo test                 # 637 个用例：532 单元 + 105 集成
-
-# Etherscan 免费 key 多为 3/s，按你的档位设 --rate（超额会被限流，但会自动退避重试）：
-blockscan discover "Uniswap V4" --rate 3 --concurrency 3
+cargo test                 # 798 个用例：667 单元 + 131 集成
 cargo clippy --all-targets # 零告警
 ```
 
@@ -409,14 +408,14 @@ cargo llvm-cov --ignore-filename-regex 'main\.rs' --show-missing-lines
 ```
 
 库代码（`src/` 除 `main.rs` 外）**行覆盖率 97.76%**（区域 97.27%、函数 98.86%），由 CI 的 `coverage` job
-每次推送实测、门禁设在 97%；此处只记百分比，精确行数每次提交都会微动，以该 job 日志为准。
+每次推送实测、门禁设在 97%；此处只记百分比，精确行数每次提交都会微动，以该 job 日志为准。逐模块数字见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 最大缺口是 `lib.rs` 91.3%（约占全部未覆盖行的四成）——watch/monitor
-循环与多链 fan-out 的错误路径需真实链才能触达。`main.rs` 仅是
-9 行入口转发（解析参数 → 初始化日志 → 调 `run`），逻辑全在 `lib.rs` 中并被完整测试，故从指标中排除。
+循环与多链 fan-out 的错误路径需真实链才能触达。`main.rs` 仅是入口转发（解析参数 → 初始化日志 → 调 `run`），逻辑全在 `lib.rs` 中并被完整测试，故从指标中排除。
 剩余未覆盖行集中于三类**无法在「不访问真实网络」的单元测试中确定性触发**的防御性分支，均经人工审阅、
 行为都是"记告警并优雅降级（返回空 / 跳过）"：
+
 1. **网络 I/O 失败路径**——HTTP 已成功响应后 `resp.text().await` 再失败、或连接中途断开
-   （如 `website.rs:49`、`defillama.rs:54`、`tokenlist.rs:41`、`rpc.rs` 重试耗尽）；
+   （`website.rs` / `defillama.rs` / `tokenlist.rs` 的抓取辅助函数，以及 `rpc.rs` 重试耗尽）；
 2. **多链编排分支**——仅在真实多链运行 / 某链 RPC 缺失时触发的告警与跳过（`lib.rs` 若干行）；
 3. **对实际不会失败的内存序列化/写入的 `?` 传播**。
 
@@ -439,7 +438,9 @@ blockscan watch --trace
 - 源码来自 Etherscan，未验证时回退 Sourcify；两者都没有则只保存字节码与可得元信息。
 - `discover` 网页搜索用 Google Custom Search（需 `GOOGLE_API_KEY` + `GOOGLE_CSE_ID`，免费档 100 次/天）；GitHub 来源解析 hardhat-deploy / Foundry 部署产物，并从 `README.md` / `*scope*.md` 抽取地址与 explorer 链接（审计 scope）。
 - 多链 RPC 需各自通过 `ETH_RPC_URL_<id>` 提供；单链时直接用 `--rpc-url`。
-- CSV 汇总对以 `= + - @` 开头的字段加 `'` 前缀，避免电子表格公式注入。
+- CSV 汇总对以 `= + - @`（以及制表符 / CR）开头的字段加 `'` 前缀，使电子表格按文本而非公式处理。
+- 人类模式的 stdout 用标准打印；下游管道被关闭时可能表现为 I/O 错误（本工具的主要产出是落盘文件）。
+- 审计引擎是启发式 linter —— 它给的是分诊信号，不是验证结论。发现项需人工复核。
 
 ## 版本发布
 

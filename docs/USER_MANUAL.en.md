@@ -41,7 +41,7 @@ Requires Rust (2021 edition) and a working C linker toolchain.
 ```bash
 # Build (on Windows you need the MSVC toolchain; see note below)
 cargo build --release        # produces target/release/blockscan
-cargo test                   # 637 tests, all green (532 unit + 105 integration)
+cargo test                   # 798 tests, all green (667 unit + 131 integration)
 cargo clippy --all-targets   # zero warnings
 ```
 
