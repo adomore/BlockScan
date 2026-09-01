@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 480" width="480" height="480" role="img" aria-label="BlockScan">
+  <!-- Square-canvas variant of logo.svg: same six facets, centred with padding
+       so the mark is not clipped by a circular or rounded icon frame. -->
+  <defs>
+    <linearGradient id="fvSilver" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#F2F4F7"/>
+      <stop offset="1" stop-color="#B6BCC6"/>
+    </linearGradient>
+    <linearGradient id="fvSteel" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#9AA1AC"/>
+      <stop offset="1" stop-color="#6C737E"/>
+    </linearGradient>
+    <linearGradient id="fvShadow" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#454B55"/>
+      <stop offset="1" stop-color="#22262D"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(112,31.5)">
+    <path fill="url(#fvSilver)" d="M127.96 0.04 L0 212.32 L127.96 287.96 Z"/>
+    <path fill="url(#fvSteel)"  d="M127.96 0.04 L255.92 212.32 L127.96 287.96 Z"/>
+    <path fill="url(#fvSteel)"  d="M0 212.32 L127.96 154.16 L127.96 287.96 Z"/>
+    <path fill="url(#fvShadow)" d="M255.92 212.32 L127.96 154.16 L127.96 287.96 Z"/>
+    <path fill="url(#fvSilver)" d="M0 236.59 L127.96 312.19 L127.96 416.91 Z"/>
+    <path fill="url(#fvSteel)"  d="M255.99 236.59 L127.96 312.19 L127.96 416.91 Z"/>
+  </g>
+</svg>

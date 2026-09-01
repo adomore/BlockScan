@@ -1,3 +1,9 @@
 # Store text as LF in the repository, check out native on each platform.
 # Matters here because CI runs the suite on both windows-latest and ubuntu-latest.
 * text=auto
+
+# The rule above detects binary content on its own, but the raster brand assets
+# are stated outright: a line-ending conversion applied to a PNG or an ICO does
+# not fail loudly, it silently corrupts the file.
+*.png binary
+*.ico binary
