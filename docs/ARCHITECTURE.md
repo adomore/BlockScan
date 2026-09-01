@@ -227,7 +227,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | **单元测试**(src 内联 `mod tests`) | **8,650** | 667 个用例,分布于各模块;Top:`ast.rs` 1,948 · `audit.rs` 951 · `mcp.rs` 612 · `lib.rs` 540 · `rpc.rs` 472 · `export.rs` 371 |
 | **集成测试**(`tests/` 三个文件) | **4,445** | 131 个用例,分三个测试二进制 —— 见下表 |
 | examples(链上小工具) | 96 | `analyze` 39 · `log_scan` 37 · `resolve_proxy` 20 |
-| 文档(docs/*.md + README) | **4,336** | 8 份域设计文档 + 任务清单 + 中/英用户手册 + 中/英新手指南 + 本文;见下索引 |
+| 文档(docs/*.md + README) | **4,470** | 8 份域设计文档 + 任务清单 + 维护记录 + 中/英用户手册 + 中/英新手指南 + 本文;见下索引 |
 
 集成测试按二进制拆分(每个文件是一个独立的 test binary,失败互不掩盖):
 
@@ -329,6 +329,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | [MONITOR_DESIGN.md](MONITOR_DESIGN.md) | 防御监控 批量3 + Phase 12–19(部署风险/去重/watch 实时/事件扩展+节流/分组 digest/周期 + 多链并行) | ✅ |
 | [MCP_DESIGN.md](MCP_DESIGN.md) | MCP 服务器 Phase 16/18/20(协议/工具集/resources/选型/stdio + 本地 HTTP 传输);安全边界的看守见 `tests/mcp_hardening.rs` | ✅ |
 | [TASKS.md](TASKS.md) | 外部审计任务清单 T-01…T-17(安全边界/可复现与可验证/检测精度/输出与工程约束) —— 状态矩阵里 `TASKS T-xx` 各行的出处 | ✅ 13/17 |
+| [MAINTENANCE_LOG.md](MAINTENANCE_LOG.md) | 维护批次记录:文档审查、缺陷清理、发布流程改造 —— 不新增功能、但改变「会不会再次出错」的那类工作 | ✅ 按次追加 |
 | [../corpus/KNOWN_GOOD_HOWTO.md](../corpus/KNOWN_GOOD_HOWTO.md) | 误报预算语料 `corpus/known_good.json` 的填槽实操指南(T-09/T-10 的前置) | 🚧 8 槽填 1,门禁未接线 |
 
 > 流程约定(来自项目记忆):每加新功能 → 先更新对应域设计文档(此时阶段标题标 🔜/🚧 = 本期计划)→ 开发 → 功能 + 性能测试 100% 覆盖(不足须说明)→ 对抗式审查 → **把域设计文档的阶段标题标记翻成 ✅ 并更新其文首「状态:」行** → 回填本文「模块盘点」与「功能状态矩阵」。
