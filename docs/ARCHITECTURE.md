@@ -227,7 +227,7 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | **单元测试**(src 内联 `mod tests`) | **8,650** | 667 个用例,分布于各模块;Top:`ast.rs` 1,948 · `audit.rs` 951 · `mcp.rs` 612 · `lib.rs` 540 · `rpc.rs` 472 · `export.rs` 371 |
 | **集成测试**(`tests/` 三个文件) | **4,445** | 131 个用例,分三个测试二进制 —— 见下表 |
 | examples(链上小工具) | 96 | `analyze` 39 · `log_scan` 37 · `resolve_proxy` 20 |
-| 文档(docs/*.md + README) | **4,470** | 8 份域设计文档 + 任务清单 + 维护记录 + 中/英用户手册 + 中/英新手指南 + 本文;见下索引 |
+| 文档(docs/*.md + README) | **4,500** | 8 份域设计文档 + 任务清单 + 维护记录 + 中/英用户手册 + 中/英新手指南 + 本文;见下索引 |
 
 集成测试按二进制拆分(每个文件是一个独立的 test binary,失败互不掩盖):
 
@@ -300,7 +300,8 @@ BlockScan 是一个 Rust CLI:**发现以太坊智能合约 → 下载已验证�
 | 模块 | 内容 | 依据 |
 |---|---|---|
 | **绑定图后续(Phase 31+)** | `resolve_decl_type` 的其余接收者形态(`arr[i].m()` 语料 90 次 / `a.b.m()` 107 次 / `payable(x).m()`;`IThing(addr).m()` 已由 Phase 28 完成);守卫按**完整访问路径**记录;`ACCESS_MISSING_GUARD_PRIVILEGED_FN` 剩余 17 条(需「是否只写调用者自身状态」判据);SafeCast「先转换后 require 校验」惯用法;同文件三元左值的既有不精确;修饰符调用解析(语料实测 0 次,优先级低) | AUDIT_DESIGN Phase 30「后续」 |
-| **已知良品语料门禁** | `corpus/known_good.json` 的误报预算:8 个槽位目前**填 1**(WETH9,`pinned_block` 仍为 `PIN_ME` 占位),且**尚未接入 CI 或任何测试** —— 断言「每条目零 High/Critical,失败即挂构建」目前只是文件里的声明。填槽流程见 [../corpus/KNOWN_GOOD_HOWTO.md](../corpus/KNOWN_GOOD_HOWTO.md) | TASKS T-09 / T-10 🚧 |
+| **语料与检测质量门禁** | 依赖链 **T-08 →(T-09、T-10)**,根在 T-08(`corpus/manifest.json`:把 42 单元语料发布成可复现清单)而非 known_good。T-09 在 CI 里算逐规则精确率/召回率并对期望文件断言;T-10 是误报预算,`corpus/known_good.json` 目前 **8 槽填 1**(WETH9,`pinned_block` 仍为 `PIN_ME` 占位)、**未接入 CI 或任何测试**,断言只是文件里的声明。填槽流程见 [../corpus/KNOWN_GOOD_HOWTO.md](../corpus/KNOWN_GOOD_HOWTO.md) | [TASKS.md](TASKS.md) T-08/09/10 🚧 硬阻断 |
+| **协议级分析** | `src/protocol.rs` 与五条 `PROTO_*` 规则(共享实现 / 共享部署者 / 悬空依赖 / 未验证依赖 / 价值集中)。**技术上今天就能做**——失败测试规格随外部审计包提供,26 个用例,`depends_on: []`。拦住它的是排序判断:五条新检测规则背后若无误报闸门,正是「规则把蓝筹合约判成 critical 而无人察觉」的成因。**决定权属项目所有者,不属实现者**;三条 known_good 种子(约一小时)即可开闸 | [TASKS.md](TASKS.md) T-11 ⏸ 政策阻断 |
 | 更多发现源 | CoinGecko/CMC · ethereum-lists · Sourcify 全量 · 4byte 聚类 · 工厂展开 · Dune | 见 📋 TODO |
 | WS `subscribe` 替代轮询;watch 下载模式多链 | 监控后续 | MONITOR_DESIGN「后续」 |
 
