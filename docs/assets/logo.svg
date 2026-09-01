@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 417" width="256" height="417" role="img" aria-label="BlockScan">
+  <defs>
+    <linearGradient id="bsSilver" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#F2F4F7"/>
+      <stop offset="1" stop-color="#B6BCC6"/>
+    </linearGradient>
+    <linearGradient id="bsSteel" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#9AA1AC"/>
+      <stop offset="1" stop-color="#6C737E"/>
+    </linearGradient>
+    <linearGradient id="bsShadow" x1="0" y1="0" x2="0.4" y2="1">
+      <stop offset="0" stop-color="#454B55"/>
+      <stop offset="1" stop-color="#22262D"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The canonical Ethereum solid: an upper and a lower tetrahedron sharing a
+       waist. Six faces, lit from the upper left, so the silhouette still reads
+       on a dark ground where the darkest facet alone would not. -->
+  <g>
+    <!-- upper left face -->
+    <path fill="url(#bsSilver)" d="M127.96 0.04 L0 212.32 L127.96 287.96 Z"/>
+    <!-- upper right face -->
+    <path fill="url(#bsSteel)" d="M127.96 0.04 L255.92 212.32 L127.96 287.96 Z"/>
+    <!-- waist, left -->
+    <path fill="url(#bsSteel)" d="M0 212.32 L127.96 154.16 L127.96 287.96 Z"/>
+    <!-- waist, right -->
+    <path fill="url(#bsShadow)" d="M255.92 212.32 L127.96 154.16 L127.96 287.96 Z"/>
+    <!-- lower left face -->
+    <path fill="url(#bsSilver)" d="M0 236.59 L127.96 312.19 L127.96 416.91 Z"/>
+    <!-- lower right face -->
+    <path fill="url(#bsSteel)" d="M255.99 236.59 L127.96 312.19 L127.96 416.91 Z"/>
+  </g>
+</svg>

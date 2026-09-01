@@ -1,10 +1,17 @@
 <div align="center">
 
+<img src="docs/assets/logo.svg" alt="" width="82">
+
 # BlockScan
 
 **Discover, download, audit and monitor smart contracts on Ethereum and EVM-compatible chains.**
 
 Written in Rust · 36 detectors · SARIF output · agent-callable over MCP
+
+[![CI](https://img.shields.io/github/actions/workflow/status/adomore/BlockScan/ci.yml?branch=main&label=CI)](https://github.com/adomore/BlockScan/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/adomore/BlockScan)](https://github.com/adomore/BlockScan/releases/latest)
+[![License](https://img.shields.io/github/license/adomore/BlockScan)](LICENSE)
+[![Rust](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fadomore%2FBlockScan%2Fmain%2FCargo.toml&query=%24.package.rust-version&label=rust&prefix=%E2%89%A5&color=dea584)](Cargo.toml)
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -17,6 +24,18 @@ Written in Rust · 36 detectors · SARIF output · agent-callable over MCP
 Point it at an address, a block range, or a project name. It downloads **verified source**, **on-chain bytecode** and **contract details**, saves them per contract, and automatically **discovers** the rest of a project's contracts — then audits, monitors and exports what it found.
 
 > **Status: 1.1.0 stable.** Feature-complete; **798 tests green, zero clippy warnings**; core paths verified against real chains. New here? The [getting-started guide](docs/GETTING_STARTED.en.md) takes you from install to a first scan in about ten minutes.
+
+## Thirty seconds
+
+```bash
+cargo build --release                       # or take a binary from Releases
+
+printf 'ETH_RPC_URL=https://ethereum-rpc.publicnode.com\nETHERSCAN_API_KEY=YOUR_KEY\n' > .env
+
+blockscan addresses 0x000000000004444c5dc75cb358380d2e3de08a90 --table -o out
+```
+
+That one address lands in its own directory under `out/`: the verified `source/` tree, `bytecode.hex`, `abi.json`, and a `metadata.json` carrying the audit verdict (grade, risk score, findings) together with the block the whole scan was pinned to, so a second run at the same pin is byte-identical. Swap `--table` for `--format json` to put it on stdout instead, `--manifest report.html` for a document, or run `blockscan mcp` to hand the same capabilities to an agent.
 
 ## Feature overview
 

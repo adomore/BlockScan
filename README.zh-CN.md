@@ -1,10 +1,17 @@
 <div align="center">
 
+<img src="docs/assets/logo.svg" alt="" width="82">
+
 # BlockScan
 
 **发现、下载、审计并监控以太坊及兼容 EVM 链上的智能合约。**
 
 Rust 实现 · 36 个检测器 · SARIF 输出 · 可经 MCP 供 agent 调用
+
+[![CI](https://img.shields.io/github/actions/workflow/status/adomore/BlockScan/ci.yml?branch=main&label=CI)](https://github.com/adomore/BlockScan/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/adomore/BlockScan)](https://github.com/adomore/BlockScan/releases/latest)
+[![License](https://img.shields.io/github/license/adomore/BlockScan)](LICENSE)
+[![Rust](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2Fadomore%2FBlockScan%2Fmain%2FCargo.toml&query=%24.package.rust-version&label=rust&prefix=%E2%89%A5&color=dea584)](Cargo.toml)
 
 **简体中文** · [English](README.md)
 
@@ -17,6 +24,18 @@ Rust 实现 · 36 个检测器 · SARIF 输出 · 可经 MCP 供 agent 调用
 给它一个地址、一段区块区间，或者一个项目名。它会下载**已验证源码**、**链上字节码**与**合约详情**，按合约落盘保存，并自动**发现**该项目其余的合约 —— 然后对结果做审计、监控与导出。
 
 > **状态：1.1.0 正式版。** 功能完整；**798 个测试全绿、clippy 零告警**；核心路径均经真实链上验证。新手请先读[新手指南](docs/GETTING_STARTED.md)，约十分钟从安装走到第一次扫描。
+
+## 三十秒
+
+```bash
+cargo build --release                       # 或直接从 Releases 取二进制
+
+printf 'ETH_RPC_URL=https://ethereum-rpc.publicnode.com\nETHERSCAN_API_KEY=YOUR_KEY\n' > .env
+
+blockscan addresses 0x000000000004444c5dc75cb358380d2e3de08a90 --table -o out
+```
+
+这一个地址会在 `out/` 下落成独立目录：已验证的 `source/` 源码树、`bytecode.hex`、`abi.json`，以及一份 `metadata.json` —— 里面装着审计结论（等级、风险分、发现项）与本次扫描固定到的那个区块，因此同一 pin 重跑一次，输出逐字节相同。把 `--table` 换成 `--format json` 即改走 stdout，换成 `--manifest report.html` 得到一份可转发的文档，或者直接 `blockscan mcp` 把同样的能力交给 agent 调用。
 
 ## 功能总览
 
