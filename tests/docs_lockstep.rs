@@ -43,9 +43,12 @@
 
 use std::path::{Path, PathBuf};
 
-/// The bilingual pairs this repository keeps in lockstep.
+/// The bilingual pairs this repository keeps in lockstep. Chinese takes the
+/// base name and English the `.en` suffix throughout — the README used to be
+/// the exception, which meant the one file GitHub renders was the one file that
+/// did not follow the convention.
 const PAIRS: [(&str, &str); 3] = [
-    ("README.md", "README.zh-CN.md"),
+    ("README.md", "README.en.md"),
     ("docs/USER_MANUAL.md", "docs/USER_MANUAL.en.md"),
     ("docs/GETTING_STARTED.md", "docs/GETTING_STARTED.en.md"),
 ];

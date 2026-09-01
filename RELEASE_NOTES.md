@@ -57,14 +57,14 @@ is now 13 tasks complete.
   fences, list-item counts, table shape including columns, and link counts. Paragraph
   counts and link targets stay free: those are translation.
 
-See the [Changelog](README.md#changelog) for the full list and
+See the [Changelog](README.en.md#changelog) for the full list and
 [docs/](https://github.com/adomore/BlockScan/tree/main/docs) for per-domain design records.
 
 ## Artifacts
 
 | File | Contents |
 |---|---|
-| `blockscan-1.1.0-x86_64-pc-windows-msvc.tar.gz` | `blockscan.exe` + `README.md` + `LICENSE` + `RELEASE_NOTES.md` |
+| `blockscan-1.1.0-x86_64-pc-windows-msvc.tar.gz` | `blockscan.exe` + `README.md` (中文) + `README.en.md` + `LICENSE` + `RELEASE_NOTES.md` |
 | `blockscan-1.1.0-src.tar.gz` | the source tree at the tag (build with `cargo build --release`) |
 | `SHA256SUMS` | SHA-256 checksums for the two archives above, produced by the release workflow from the archives it built |
 

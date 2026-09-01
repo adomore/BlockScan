@@ -69,7 +69,7 @@ jobs:
           set -euo pipefail
           dir="blockscan-$VERSION-x86_64-pc-windows-msvc"
           mkdir -p "dist/$dir"
-          cp target/release/blockscan.exe README.md LICENSE RELEASE_NOTES.md "dist/$dir/"
+          cp target/release/blockscan.exe README.md README.en.md LICENSE RELEASE_NOTES.md "dist/$dir/"
           tar czf "dist/$dir.tar.gz" -C dist "$dir"
           rm -rf "dist/$dir"
           # HEAD is the tag: checkout above resolved it. Archiving the commit
