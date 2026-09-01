@@ -1,13 +1,22 @@
+<div align="center">
+
 # BlockScan
+
+**发现、下载、审计并监控以太坊及兼容 EVM 链上的智能合约。**
+
+Rust 实现 · 36 个检测器 · SARIF 输出 · 可经 MCP 供 agent 调用
 
 **简体中文** · [English](README.md)
 
-扫描以太坊（及兼容 EVM 链）上的智能合约，下载**已验证源码**、**链上字节码**与**合约详情**，按合约落盘保存；并能按项目自动**发现**相关合约。Rust 实现。
+[新手指南](docs/GETTING_STARTED.md) &nbsp;·&nbsp; [用户手册](docs/USER_MANUAL.md) &nbsp;·&nbsp; [架构设计](docs/ARCHITECTURE.md) &nbsp;·&nbsp; [版本发布](https://github.com/adomore/BlockScan/releases/latest)
 
-> 状态：**1.1.0 正式版** —— 功能完整、**798 个测试全绿、clippy 零告警**、核心路径均经真实链上验证。
->
-> 新手请先读 **新手指南:[中文](docs/GETTING_STARTED.md) · [English](docs/GETTING_STARTED.en.md)**(约 10 分钟:安装 → 配置 → 扫到第一个合约)。
-> 用户手册:**[中文](docs/USER_MANUAL.md)** · **[English](docs/USER_MANUAL.en.md)**;架构 / 模块盘点 / 代码量 / 功能状态矩阵见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**(顶层开发设计文档)。
+</div>
+
+---
+
+给它一个地址、一段区块区间，或者一个项目名。它会下载**已验证源码**、**链上字节码**与**合约详情**，按合约落盘保存，并自动**发现**该项目其余的合约 —— 然后对结果做审计、监控与导出。
+
+> **状态：1.1.0 正式版。** 功能完整；**798 个测试全绿、clippy 零告警**；核心路径均经真实链上验证。新手请先读[新手指南](docs/GETTING_STARTED.md)，约十分钟从安装走到第一次扫描。
 
 ## 功能总览
 

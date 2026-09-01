@@ -1,13 +1,22 @@
+<div align="center">
+
 # BlockScan
+
+**Discover, download, audit and monitor smart contracts on Ethereum and EVM-compatible chains.**
+
+Written in Rust · 36 detectors · SARIF output · agent-callable over MCP
 
 **English** · [简体中文](README.zh-CN.md)
 
-Scan smart contracts on Ethereum (and EVM-compatible chains): download **verified source**, **on-chain bytecode**, and **contract details**, save them per-contract, and automatically **discover** a project's related contracts. Written in Rust.
+[Getting started](docs/GETTING_STARTED.en.md) &nbsp;·&nbsp; [User manual](docs/USER_MANUAL.en.md) &nbsp;·&nbsp; [Architecture](docs/ARCHITECTURE.md) &nbsp;·&nbsp; [Releases](https://github.com/adomore/BlockScan/releases/latest)
 
-> Status: **1.1.0 stable** — feature-complete, **798 tests green, zero clippy warnings**, core paths verified against real chains.
->
-> New here? Start with the **Getting Started guide: [English](docs/GETTING_STARTED.en.md) · [中文](docs/GETTING_STARTED.md)** (install → configure → first scan in ~10 min).
-> User manual: **[English](docs/USER_MANUAL.en.md)** · **[中文](docs/USER_MANUAL.md)**; architecture / module inventory / LOC / feature-status matrix in **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** (top-level design doc).
+</div>
+
+---
+
+Point it at an address, a block range, or a project name. It downloads **verified source**, **on-chain bytecode** and **contract details**, saves them per contract, and automatically **discovers** the rest of a project's contracts — then audits, monitors and exports what it found.
+
+> **Status: 1.1.0 stable.** Feature-complete; **798 tests green, zero clippy warnings**; core paths verified against real chains. New here? The [getting-started guide](docs/GETTING_STARTED.en.md) takes you from install to a first scan in about ten minutes.
 
 ## Feature overview
 
